@@ -33,15 +33,18 @@ pub(in crate::attacks) fn queen_moves(position: &Position, allies: u64, enemies:
     }
 }
 
+pub fn orthogonal_attacks(sq: usize, occupied: u64) -> u64 {
+    let blockers = ROOK_MASKS[sq] & occupied;
+    let idx = ((blockers.wrapping_mul(ROOK_MAGICS[sq]))
+        >> ROOK_SHIFTS[sq]) as usize;
+
+
+    let row = &ROOK_ATTACKS[sq];
+    row[idx]
+}
+
 fn orthogonal_moves(allies: u64, enemies: u64, moves: &mut MoveList, sq: u8) {
-    // 1. blockers & magic index   ------------------------------------
-    let blockers = ROOK_MASKS[sq as usize] & (allies | enemies);
-    let idx = ((blockers.wrapping_mul(ROOK_MAGICS[sq as usize]))
-        >> ROOK_SHIFTS[sq as usize]) as usize;
-
-
-    let row = &ROOK_ATTACKS[sq as usize];   // & [u64; 4096]  (32 KiB lives in .rodata, no copy)
-    let attacks = row[idx] & !allies;
+    let attacks = orthogonal_attacks(sq as usize, allies|enemies) & !allies;
 
     let quiet_bb = attacks & !enemies;
     let capture_bb = attacks & enemies;
@@ -54,15 +57,18 @@ fn orthogonal_moves(allies: u64, enemies: u64, moves: &mut MoveList, sq: u8) {
     });
 }
 
+pub fn diagonal_attacks(sq: usize, occupied: u64) -> u64 {
+    let blockers = BISHOP_MASKS[sq] & occupied;
+    let idx = ((blockers.wrapping_mul(BISHOP_MAGICS[sq]))
+        >> BISHOP_SHIFTS[sq]) as usize;
+
+    let row = &BISHOP_ATTACKS[sq];
+    row[idx]
+    
+}
+
 fn diagonal_moves(allies: u64, enemies: u64, moves: &mut MoveList, sq: u8) {
-    // 1. blockers & magic index   ------------------------------------
-    let blockers = BISHOP_MASKS[sq as usize] & (allies | enemies);
-    let idx = ((blockers.wrapping_mul(BISHOP_MAGICS[sq as usize]))
-        >> BISHOP_SHIFTS[sq as usize]) as usize;
-
-
-    let row = &BISHOP_ATTACKS[sq as usize];
-    let attacks = row[idx] & !allies;
+    let attacks = diagonal_attacks(sq as usize, allies | enemies) & !allies;
 
     let quiet_bb = attacks & !enemies;
     let capture_bb = attacks & enemies;

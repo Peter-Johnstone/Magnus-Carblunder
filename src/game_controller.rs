@@ -1,5 +1,6 @@
 use crate::gui::{get_mouse_square, GuiState};
 use crate::position::Position;
+use crate::color::Color;
 use macroquad::prelude::*;
 use crate::mov::MoveList;
 use crate::attacks::movegen::all_moves;
@@ -30,6 +31,7 @@ impl GameController {
     async fn update(&mut self) {
         if is_mouse_button_pressed(MouseButton::Left) {
             let square: u8 = get_mouse_square(mouse_position());
+            println!("{}", self.position.square_under_attack(square, Color::Black));
             if (1u64 << square) & self.position.occupancy(self.position.turn()) != 0 {
                 self.selected_moves = all_moves(&self.position).moves_from_square(square);
             } else {

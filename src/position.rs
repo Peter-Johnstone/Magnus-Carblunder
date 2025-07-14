@@ -1,6 +1,9 @@
 use std::str::SplitWhitespace;
+use crate::attacks::sliding::{diagonal_attacks, orthogonal_attacks};
 use crate::castling_rights::CastlingRights;
 use crate::color::Color;
+use crate::attacks::tables::{BISHOP_ATTACKS, KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS};
+use crate::bitboards::print_bitboard;
 use crate::mov::{Move, MoveKind};
 use crate::piece::{decode_piece, encode_piece, EncodedPiece, Piece, EMPTY_PIECE};
 
@@ -58,7 +61,7 @@ impl Position {
         let mut iter: SplitWhitespace = fen.split_whitespace();
 
         let piece_positions: &str = iter.next().expect("FEN is missing piece positions");
-        load_board_from_fen(&mut position, piece_positions);
+        position.load_board_from_fen(piece_positions);
 
         let turn_str: &str = iter.next().expect("FEN is missing current turn");
         position.turn = Color::from_str(turn_str);
@@ -83,6 +86,22 @@ impl Position {
         position.half_move = half_move_str.parse::<u8>().expect("Invalid half move count");
 
         position
+    }
+
+    fn load_board_from_fen(&mut self, fen_board : &str) {
+        for (row_index, row) in fen_board.split('/').enumerate() {
+            let mut col_index = 0;
+            for ch in row.chars() {
+                if ch.is_ascii_digit() {
+                    col_index += ch.to_digit(10).unwrap() as usize;
+                } else {
+                    let square: usize = square_index(row_index, col_index);
+                    update_bitboards_pieces(self, ch, square as u8);
+                    self.board[square] = piece_from_char(ch);
+                    col_index += 1;
+                }
+            }
+        }
     }
 
     pub fn do_move(&mut self, mov: Move) {
@@ -113,6 +132,12 @@ impl Position {
             turn: self.turn,
         });
 
+        // fuck up castling rights without being a castle itself
+        if piece == Piece::King {self.castling_rights.remove_castling_rights(self.turn)}
+        self.handle_rook_castling_change(from, to);
+
+        if mov.is_castling() {self.handle_castle(from, to)}
+
         // Move the piece
         self.move_piece(piece, color, from, to);
 
@@ -126,6 +151,14 @@ impl Position {
         self.turn = !self.turn;
     }
 
+    fn handle_rook_castling_change(&mut self, from: usize, to: usize) {
+        if to == 0 || to == 7 || to == 56 || to == 63 {
+            self.castling_rights.remove_castling_right(to);
+        }
+        if from == 0 || from == 7 || from == 56 || from == 63 {
+            self.castling_rights.remove_castling_right(from);
+        }
+    }
 
     fn move_piece(&mut self, piece: Piece, color: Color, from: usize, to: usize) {
         let p = piece as usize;
@@ -175,6 +208,12 @@ impl Position {
 
     }
 
+    fn handle_castle(&mut self, from: usize, to: usize) {
+        let rook_to = (from + to) / 2;
+        let rook_from =  if to == 2 || to == 58 {to - 2} else {to + 1}; // if queenside rook came from left, else came from right
+        self.move_piece(Piece::Rook, self.turn, rook_from, rook_to);
+    }
+
     fn update_rule50(&mut self, piece: Piece, is_capture: bool) {
         if piece == Piece::Pawn || is_capture {
             self.half_move = 0;
@@ -183,16 +222,50 @@ impl Position {
         }
     }
 
+    pub fn square_under_attack(&self, sq: u8, by: Color) -> bool {
+        let enemies = self.occupancy(by);
+
+        let pawns = self.pawns() & enemies;
+
+        // !by because our attacks (!by) is the fields of where enemy pawns can attack us
+        if PAWN_ATTACKS[!by as usize][sq as usize] & pawns != 0 {
+            return true;
+        }
+        let king = self.kings() & enemies;
+        if KING_MOVES[sq as usize] & king != 0 {
+            return true;
+        }
+
+        let knights = self.knights() & enemies;
+        if KNIGHT_MOVES[sq as usize] & knights != 0 {
+            return true;
+        }
+
+        let bishops = self.bishops() & enemies;
+        let queens = self.queens() & enemies;
+        let occ = self.occupied();
+
+        if diagonal_attacks(sq as usize, occ) & (bishops | queens) != 0 {
+            return true;
+        }
+        let rooks = self.rooks() & enemies;
+        if orthogonal_attacks(sq as usize, occ) & (rooks | queens) != 0 {
+            return true;
+        }
+        false
+    }
 
     pub fn turn(&self) -> Color {
         self.turn
     }
+
     pub fn occupancy(&self, color: Color) -> u64 {
         match color {
             Color::White => self.white(),
             Color::Black => self.black()
         }
     }
+
     pub fn pawns(&self) -> u64 {
         self.piece_bitboards[Piece::Pawn as usize]
     }
@@ -218,6 +291,10 @@ impl Position {
         self.color_bitboards[Color::Black as usize]
     }
 
+    pub fn occupied(&self) -> u64 {
+        self.black() | self.white()
+    }
+
     pub fn en_passant_capture_pawn(&self) -> u8 {
         if self.en_passant == 64 {
             panic!("No en passant possible!");
@@ -227,15 +304,31 @@ impl Position {
             Color::Black => self.en_passant + 8 // black to move, vice versa
         }
     }
+
     pub fn en_passant(&self) -> u8 {
         self.en_passant
     }
+
+    pub fn kingside(&self, color: Color) -> bool {
+        self.castling_rights.kingside(color)
+    }
+
+    pub fn queenside(&self, color: Color) -> bool {
+        self.castling_rights.queenside(color)
+    }
+
+    pub fn board_sq(&self, sq: u8) -> EncodedPiece {
+        self.board[sq as usize]
+    }
+
     pub fn piece_list(&self, piece: Piece, color: Color) -> ([u8; MAX_PIECES], usize)  {
         (self.piece_list[piece as usize][color as usize], self.piece_count[piece as usize][color as usize])
     }
+
     pub fn king_square(&self, color: Color) -> u8 {
         self.piece_list[Piece::King as usize][color as usize][0]
     }
+
     pub fn get_allied(&self, piece: Piece) -> u64 {
         self.piece_bitboards[piece as usize]&self.color_bitboards[self.turn as usize]
     }
@@ -243,22 +336,6 @@ impl Position {
 
 fn square_index(row: usize, col: usize) -> usize {
     (7 - row)* 8 + col // (7 - row) because fens start from black pieces for some reason
-}
-
-fn load_board_from_fen(position: &mut Position, fen_board : &str) {
-    for (row_index, row) in fen_board.split('/').enumerate() {
-        let mut col_index = 0;
-        for ch in row.chars() {
-            if ch.is_ascii_digit() {
-                col_index += ch.to_digit(10).unwrap() as usize;
-            } else {
-                let square: usize = square_index(row_index, col_index);
-                update_bitboards_pieces(position, ch, square as u8);
-                position.board[square] = piece_from_char(ch);
-                col_index += 1;
-            }
-        }
-    }
 }
 
 fn piece_from_char(ch: char) -> EncodedPiece {

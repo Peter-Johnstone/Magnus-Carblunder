@@ -4,48 +4,39 @@ use crate::table_gen::bitboards;
 pub(crate) const BISHOP_MASKS: [u64; 64] = generate_bishop_masks();
 
 pub const fn generate_bishop_masks() -> [u64; 64] {
-    const MAIN: u64  = 0x8040_2010_0804_0201; // A1–H8
-    const ANTI: u64  = 0x0102_0408_1020_4080; // H1–A8
+    const DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+    let mut masks = [0u64; 64];
 
-    const EDGES: u64 =
-            0x0101_0101_0101_0101 | // file A
-            0x8080_8080_8080_8080 | // file H
-            0x0000_0000_0000_00FF | // rank 1
-            0xFF00_0000_0000_0000;  // rank 8
-
-    let mut boards = [0u64; 64];
-    let mut sq = 0;
-
+    let mut sq = 0u8;
     while sq < 64 {
-        let file = sq % 8;          // 0..7
-        let rank = sq / 8;          // 0..7
-        let sq_bb = 1u64 << sq;
+        let file = (sq % 8) as i8;
+        let rank = (sq / 8) as i8;
 
-        // main diagonal (↗︎ / ↙︎) → file - rank is constant
-        let diff = (file as i8) - (rank as i8);
-        let sum  = file + rank;         // 0..14
+        let mut mask = 0u64;
 
+        // loop over the four diagonal directions
+        let mut d = 0;
+        while d < 4 {
+            let (df, dr) = DIRS[d];
+            let mut f = file + df;
+            let mut r = rank + dr;
 
-        let main_mask = if diff < 0 {
-            MAIN >> ((-diff as u32) * 8)
-        } else {
-            MAIN << ((diff as u32) * 8)
-        };
+            // stop one square before the edge (file 0/7 or rank 0/7)
+            while f > 0 && f < 7 && r > 0 && r < 7 {
+                mask |= 1u64 << (r * 8 + f) as u64;
+                f += df;
+                r += dr;
+            }
+            d += 1;
+        }
 
-        let anti_mask = if sum < 8 {
-            ANTI >> ((7 - sum) * 8)
-        } else {
-            ANTI << ((sum - 7) * 8)
-        };
-
-
-        boards[sq as usize] =
-            (main_mask | anti_mask) & !EDGES & !sq_bb;
-
+        masks[sq as usize] = mask;
         sq += 1;
     }
-    boards
+    masks
 }
+
+
 
 
 pub fn compute_bishop_attack(sq: u8, blockers: u64) -> u64 {
@@ -61,19 +52,23 @@ pub fn compute_bishop_attack(sq: u8, blockers: u64) -> u64 {
 
     for &(step, edge_file) in &DIRS {
         let mut pos = sq as i8 + step;
-        while (0..64).contains(&pos) {
+        // ---------- compute_bishop_attack ---------------------------------------
+        let mut pos = sq as i8;
+        loop {
+            let file = pos % 8;
+            pos += step;
+
+            if pos < 0 || pos >= 64 { break; }
+
+            let next_file = pos % 8;
+            if (step == 9 || step == -7) && next_file <= file { break; } // NE / SW wrap
+            if (step == 7 || step == -9) && next_file >= file { break; } // NW / SE wrap
+
             let bit = 1u64 << pos;
             attacks |= bit;
 
-            if blockers & bit != 0 {
-                break;
-            }
-            if (pos as u8 % 8) == edge_file {
-                break;
-            }
-            pos += step;
+            if blockers & bit != 0 { break; }
         }
-
     }
 
     attacks

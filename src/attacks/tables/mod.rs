@@ -9,7 +9,9 @@ mod rook_masks;
 
 mod bishop_masks;
 mod bishop_attacks;
+pub mod pawn_attacks;
 
+pub use pawn_attacks::PAWN_ATTACKS;
 pub use king_moves::KING_MOVES;
 pub use rook_masks::ROOK_MASKS;
 pub use knight_moves::KNIGHT_MOVES;

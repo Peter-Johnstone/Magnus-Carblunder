@@ -4,6 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
+use crate::table_gen::pawn::pawn_attacks;
 
 mod table_gen; // ./table_gen
 
@@ -35,6 +36,7 @@ fn main() {
     write_rook_attack_table(out_dir);
     write_rook_masks(out_dir);
     write_king_moves(out_dir);
+    write_pawn_attacks(out_dir);
     write_knight_moves(out_dir);
     write_bishop_attack_table(out_dir);
     write_bishop_masks(out_dir);
@@ -108,6 +110,27 @@ fn write_king_moves(out_dir: &Path) {
         &table_gen::king::king_table(),
     );
 }
+
+fn write_pawn_attacks(out_dir: &Path) {
+    let dest   = out_dir.join("pawn_attacks.rs");
+    let mut src = String::new();
+
+    src.push_str("pub static PAWN_ATTACKS: [[u64; 64]; 2] = [\n");
+    for (color_idx, row) in pawn_attacks().iter().enumerate() {
+        src.push_str("    [");
+        for (i, v) in row.iter().enumerate() {
+            src.push_str(&format!("0x{v:016X}u64"));
+            if i != 63 { src.push_str(", "); }
+        }
+        src.push_str("]");
+        if color_idx == 0 { src.push(','); }
+        src.push('\n');
+    }
+    src.push_str("];\n");
+    write_if_changed(&dest, &src);
+}
+
+
 
 fn write_knight_moves(out_dir: &Path) {
     write_u64_slice(

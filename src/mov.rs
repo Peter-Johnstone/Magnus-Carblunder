@@ -114,6 +114,10 @@ impl Move {
     pub fn is_en_passant(&self) -> bool {
         self.kind() == MoveKind::EnPassant
     }
+    
+    pub fn is_castling(&self) -> bool {
+        self.kind() == MoveKind::Castling
+    }
 }
 
 
