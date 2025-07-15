@@ -7,4 +7,6 @@ mod gui;
 mod mov;
 mod piece;
 mod attacks;
+mod direction;
+mod state_info;
 

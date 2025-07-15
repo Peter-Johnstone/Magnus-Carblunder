@@ -41,8 +41,8 @@ pub struct Move {
 impl Default for Move {
     fn default() -> Self {
         Move {
-            from: 0,
-            to: 0,
+            from: 64,
+            to: 64,
             flags: MoveFlags::new(MoveKind::Quiet), // or some invalid combo
         }
     }

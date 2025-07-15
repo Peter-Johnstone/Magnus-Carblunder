@@ -10,7 +10,15 @@ mod rook_masks;
 mod bishop_masks;
 mod bishop_attacks;
 pub mod pawn_attacks;
+mod rays;
+mod between_exclusive;
+mod between_inclusive;
+mod line_bb;
 
+pub use line_bb::LINE_BB;
+pub use between_inclusive::BETWEEN_INCLUSIVE;
+pub use between_exclusive::BETWEEN_EXCLUSIVE;
+pub use rays::RAYS;
 pub use pawn_attacks::PAWN_ATTACKS;
 pub use king_moves::KING_MOVES;
 pub use rook_masks::ROOK_MASKS;

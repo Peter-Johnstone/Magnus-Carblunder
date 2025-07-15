@@ -1,4 +1,3 @@
-use std::panic::panic_any;
 use crate::color::Color;
 
 #[derive(Default, Debug, Clone, Copy)]

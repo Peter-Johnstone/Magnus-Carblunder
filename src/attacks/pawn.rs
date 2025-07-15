@@ -1,64 +1,160 @@
+use crate::attacks::tables::PAWN_ATTACKS;
+use crate::bitboards::{FILE_A, FILE_H, PROMO_RANKS, RANK_3, RANK_6};
+use crate::bitboards::pop_lsb;
 use crate::color::Color;
 use crate::mov::{Move, MoveFlags, MoveKind, MoveList};
 use crate::piece::Piece;
-use crate::position::Position;
+use crate::state_info::StateInfo;
+use crate::position::{Position};
 
-pub (in crate::attacks) fn pawn_moves(position: &Position, pawns: u64, allies: u64, enemies: u64, us: Color, moves: &mut MoveList) {
-    let occupied: u64 = allies|enemies;
 
-    #[inline]
-    fn advance(bb: u64, amount: u8, color: Color) -> u64 {
-        if color.is_white() { bb << amount } else { bb >> amount }
+#[inline]
+fn advance(bb: u64, amount: u8, color: Color) -> u64 {
+    if color.is_white() { bb << amount } else { bb >> amount }
+}
+
+#[inline]
+pub fn generate_pawn_moves_from(mut bitboard: u64, shift: u8, color: Color, move_kind: MoveKind, moves: &mut MoveList) {
+    while bitboard != 0 {
+        let to = bitboard.trailing_zeros() as u8;
+        let from = if color.is_white() { to - shift } else { to + shift };
+        if PROMO_RANKS & (1u64 << to) != 0 {
+            for piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
+                moves.push(Move::encode(from, to, MoveFlags::with_promote(move_kind, piece)));
+            }
+        } else {
+            moves.push(Move::encode(from, to, MoveFlags::new(move_kind)));
+        }
+        bitboard &= bitboard - 1;
     }
+}
 
-    #[inline]
-    fn reverse(sq: u8, amount: u8, color: Color) -> u8 {
-        if color.is_white() { sq - amount } else { sq + amount }
+
+pub (in crate::attacks) fn pawn_moves(position: &Position, enemies: u64, info: &StateInfo, us: Color, moves: &mut MoveList) {
+    let occupied: u64 = position.occupied();
+    let king_sq  = position.king_square(us) as usize;
+    let all_pawns  = position.get_allies(Piece::Pawn);
+    let pinned     = info.blockers_for_king & all_pawns;   // only *our* pinned pieces
+
+    let en_passant_bb: u64 = if position.en_passant() == 64 { 0 } else { 1u64 << position.en_passant() };
+
+    unpinned_pawns(position, enemies, us, moves, occupied, en_passant_bb, all_pawns & !pinned);
+
+    // ── pinned pawns – treat one by one ──────────────────
+    let mut bb = pinned;
+    while bb != 0 {
+        let from = bb.trailing_zeros() as usize;
+        bb &= bb - 1;
+
+        // ❶ build the pin ray mask (inclusive king↔slider)
+        let mask = StateInfo::pin_ray(king_sq, from, info.pinners);
+
+        // ❷ generate moves for just this pawn, then AND with mask
+        pawn_from_pinned_sq(position, from as u8, enemies, en_passant_bb ,mask, us, moves);
     }
+}
+
+fn pawn_from_pinned_sq(position: &Position, sq: u8, enemies: u64, en_passant_bb: u64, mask:  u64, us: Color, moves: &mut MoveList) {
+    let occupied = position.occupied();
+    let push_rank = if us.is_white() { RANK_3 } else { RANK_6 };
+    let (lshift, rshift) = if us.is_white() { (7, 9) } else { (9, 7) };
+
+    let from_bb = 1u64 << sq;
+
+    let pseudo_single: u64 = advance(from_bb, 8, us) & (!occupied);
+    let single: u64 = pseudo_single & mask;
+    let double: u64 = advance(pseudo_single & push_rank, 8, us) & mask;
+    // captures on the two diagonals
+    let capture_left = advance(from_bb & !FILE_A, lshift, us) & enemies & mask;
+    let capture_right = advance(from_bb & !FILE_H, rshift, us) & enemies & mask;
+    let en_passant_left  = advance(from_bb & !FILE_A, lshift, us) & en_passant_bb & mask;
+    let en_passant_right = advance(from_bb & !FILE_H, rshift, us) & en_passant_bb & mask;
+
+    generate_pawn_moves_from(single, 8,  us, MoveKind::Quiet,       moves);
+    generate_pawn_moves_from(double, 16, us, MoveKind::DoublePush,  moves);
+    generate_pawn_moves_from(capture_left, lshift, us, MoveKind::Capture, moves);
+    generate_pawn_moves_from(capture_right, rshift, us, MoveKind::Capture, moves);
+    generate_pawn_moves_from(en_passant_left,  lshift, us, MoveKind::EnPassant, moves);
+    generate_pawn_moves_from(en_passant_right, rshift, us, MoveKind::EnPassant, moves);
+}
 
 
-    let push_rank: u64 = if us.is_white() {0x0000_0000_00FF_0000} else {0x0000_FF00_0000_0000};
-    const FILE_A: u64 = 0x0101_0101_0101_0101;
-    const FILE_H: u64 = 0x8080_8080_8080_8080;
-    const PROMO_RANKS: u64 = 0xFF00_0000_0000_00FF;
-
-    let en_passant_bb: u64 = if position.en_passant() == 64 {0} else {1u64 << position.en_passant()} ;
+fn unpinned_pawns(position: &Position, enemies: u64, us: Color, moves: &mut MoveList, occupied: u64, en_passant_bb: u64, pawns: u64) {
+    let push_rank: u64 = if us.is_white() { RANK_3 } else { RANK_6 };
 
     let (lshift, rshift) = if us.is_white() { (7u8, 9u8) } else { (9u8, 7u8) };
 
     // Get the destinations bitboards
-    let single: u64 = advance(pawns, 8, us)&(!occupied);
-    let double: u64 = advance(single&push_rank, 8, us)&(!occupied);
+    let single: u64 = advance(pawns, 8, us) & (!occupied);
+    let double: u64 = advance(single & push_rank, 8, us) & (!occupied);
 
-    let left_captures  = advance(pawns & !FILE_A, lshift, us) & enemies;
+    let left_captures = advance(pawns & !FILE_A, lshift, us) & enemies;
     let right_captures = advance(pawns & !FILE_H, rshift, us) & enemies;
 
-    let left_en_passant  = advance(pawns & !FILE_A, lshift, us) & en_passant_bb;
+    let left_en_passant = advance(pawns & !FILE_A, lshift, us) & en_passant_bb;
     let right_en_passant = advance(pawns & !FILE_H, rshift, us) & en_passant_bb;
 
+    generate_pawn_moves_from(single, 8, us, MoveKind::Quiet, moves);
+    generate_pawn_moves_from(double, 16, us, MoveKind::DoublePush, moves);
+    generate_pawn_moves_from(left_captures, lshift, us, MoveKind::Capture, moves);
+    generate_pawn_moves_from(right_captures, rshift, us, MoveKind::Capture, moves);
+    generate_pawn_moves_from(left_en_passant, lshift, us, MoveKind::EnPassant, moves);
+    generate_pawn_moves_from(right_en_passant, rshift, us, MoveKind::EnPassant, moves);
+}
 
-    // Loop used for extracting the origins (from) and the destinations (to) for each move from the pawn and destination bitboards
-    let pop_lsb_loop = |bitboard: u64, shift: u8, move_kind: MoveKind, moves: &mut MoveList| {
-        let mut bb = bitboard;
-        while bb != 0 {
-            let to = bb.trailing_zeros() as u8;
-            let from = reverse(to, shift, us);
-            if PROMO_RANKS & (1u64 << to) != 0 {
-                // four under-promotion variants
-                for piece in [Piece::Queen, Piece::Rook, Piece::Bishop, Piece::Knight] {
-                    moves.push(Move::encode(from, to, MoveFlags::with_promote(move_kind, piece)));
-                }
-            } else {
-                moves.push(Move::encode(from, to, MoveFlags::new(move_kind)));
-            }
-            bb &= bb - 1;
-        }
-    };
+pub fn pawn_moves_evasion(position: &Position, info: &StateInfo, enemies: u64, block_mask: u64, checker_bb: u64, us: Color, moves: &mut MoveList) {
+    let occupied: u64 = position.occupied();
 
-    pop_lsb_loop(single, 8, MoveKind::Quiet, moves);
-    pop_lsb_loop(double,16, MoveKind::DoublePush, moves);
-    pop_lsb_loop(left_captures, lshift, MoveKind::Capture, moves);
-    pop_lsb_loop(right_captures, rshift, MoveKind::Capture, moves);
-    pop_lsb_loop(left_en_passant, lshift, MoveKind::EnPassant, moves);
-    pop_lsb_loop(right_en_passant, rshift, MoveKind::EnPassant, moves);
+    let all_pawns: u64 = position.get_allies(Piece::Pawn);
+    let pinned     = info.blockers_for_king & all_pawns;   // only *our* pinned pieces
+
+
+    let en_passant_bb: u64 = if position.en_passant() == 64 { 0 } else { 1u64 << position.en_passant() };
+    let mut pinned_bb = pinned & position.get_allies(Piece::Pawn);
+    while pinned_bb != 0 {
+        let from = pinned_bb.trailing_zeros() as usize;
+        pinned_bb &= pinned_bb - 1;
+
+        let ray_mask = StateInfo::pin_ray(position.king_square(us) as usize, from, info.pinners) & block_mask;
+        pawn_from_pinned_sq(position, from as u8, enemies, en_passant_bb, ray_mask, us, moves);
+    }
+
+    let unpinned = all_pawns & !pinned;
+
+
+    let push_rank: u64 = if us.is_white() {RANK_3} else {RANK_6};
+
+    let en_passant_bb: u64 = if position.en_passant() == 64 {0} else {1u64 << position.en_passant()} ;
+    let en_passant_piece_bb: u64 = if en_passant_bb == 0 {0} else {1u64 << position.en_passant_capture_pawn()} ;
+    let en_passant_legal: u64 = en_passant_piece_bb | checker_bb;
+
+    let (lshift, rshift) = if us.is_white() { (7u8, 9u8) } else { (9u8, 7u8) };
+
+    // Get the destinations bitboards
+    let pseudo_single: u64 = advance(unpinned, 8, us) & (!occupied);
+    let single: u64 = pseudo_single & block_mask;
+    let double: u64 = advance(pseudo_single & push_rank, 8, us) & block_mask; // block mask already ensures its !occupied
+
+    let left_captures  = advance(unpinned & !FILE_A, lshift, us) & checker_bb;
+    let right_captures = advance(unpinned & !FILE_H, rshift, us    ) & checker_bb;
+
+    let left_en_passant  = advance(unpinned & !FILE_A, lshift, us) & en_passant_bb & en_passant_legal;
+    let right_en_passant = advance(unpinned & !FILE_H, rshift, us) & en_passant_bb & en_passant_legal;
+
+    generate_pawn_moves_from(single, 8, us, MoveKind::Quiet, moves);
+    generate_pawn_moves_from(double, 16, us, MoveKind::DoublePush, moves);
+    generate_pawn_moves_from(left_captures, lshift, us, MoveKind::Capture, moves);
+    generate_pawn_moves_from(right_captures, rshift, us, MoveKind::Capture, moves);
+    generate_pawn_moves_from(left_en_passant, lshift, us, MoveKind::EnPassant, moves);
+    generate_pawn_moves_from(right_en_passant, rshift, us, MoveKind::EnPassant, moves);
+}
+
+
+pub fn pawn_attacks(position: &Position, color: Color) -> u64{
+    let mut attacks: u64 = 0;
+    let pawns = position.piece_bb(Piece::Pawn, color);
+    pop_lsb(pawns, |sq| {
+        attacks |= PAWN_ATTACKS[color as usize][sq as usize];
+    });
+    attacks
 }

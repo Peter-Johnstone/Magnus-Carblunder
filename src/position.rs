@@ -1,11 +1,14 @@
 use std::str::SplitWhitespace;
+use crate::attacks::movegen::all_attacks;
 use crate::attacks::sliding::{diagonal_attacks, orthogonal_attacks};
 use crate::castling_rights::CastlingRights;
 use crate::color::Color;
-use crate::attacks::tables::{BISHOP_ATTACKS, KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS};
+use crate::attacks::tables::{KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS, RAYS};
 use crate::bitboards::print_bitboard;
 use crate::mov::{Move, MoveKind};
+use crate::direction::Dir;
 use crate::piece::{decode_piece, encode_piece, EncodedPiece, Piece, EMPTY_PIECE};
+pub(crate) use crate::state_info::StateInfo;
 
 const MAX_PIECES: usize = 10;
 
@@ -22,7 +25,7 @@ pub struct Undo {
 #[derive(Debug)]
 pub struct Position {
     board: [EncodedPiece; 64],
-    piece_list: [[ [u8; MAX_PIECES]; 2 ]; 6],  // [color][piece][index]
+    piece_list: [[[u8; MAX_PIECES]; 2]; 6],  // [piece][color][index]
     piece_count: [[usize; 2]; 6],
     reverse_piece_index: [[[Option<usize>; 64]; 2]; 6], // [piece][color][square]
     piece_bitboards: [u64; 6], // [p, n, b, r, q]
@@ -222,6 +225,70 @@ impl Position {
         }
     }
 
+
+    pub fn compute_pins_checks(&self, us: Color) -> StateInfo {
+        let king_sq = self.king_square(us) as usize;
+        let occ     = self.occupied();
+
+        // enemy sliders
+        let rooks   = self.rooks()   & self.occupancy(!us);
+        let bishops = self.bishops() & self.occupancy(!us);
+        let queens  = self.queens()  & self.occupancy(!us);
+        let ortho_sliders = rooks  | queens;
+        let diag_sliders  = bishops| queens;
+
+        let mut checkers           = 0u64;
+        let mut blockers_for_king  = 0u64;
+        let mut pinners            = 0u64;
+
+        // ① ray‑based checks and pins
+        for dir in Dir::ALL {
+            // pieces (friend+foe) in that direction
+            let mut ray = RAYS[dir.idx()][king_sq] & occ;
+            if ray == 0 { continue; }
+
+            let first_sq  = ray.trailing_zeros() as u8;
+            let first_bb  = 1u64 << first_sq;
+            let sliders   = if dir.is_ortho() { ortho_sliders } else { diag_sliders };
+
+            // Always test the *first* piece for a direct check
+            if first_bb & sliders != 0 {
+                checkers |= first_bb;
+                // Don’t continue; a checking slider blocks any pin behind it
+                continue;
+            }
+
+            // If the first piece is OURS it may be pinned
+            if first_bb & self.occupancy(us) != 0 {
+                ray &= ray - 1;              // pop first piece
+                if ray != 0 {
+                    let second_sq = ray.trailing_zeros() as u8;
+                    let second_bb = 1u64 << second_sq;
+                    if second_bb & sliders != 0 {
+                        // first_bb is the single blocker ==> pinned
+                        blockers_for_king |= first_bb;
+                        pinners           |= second_bb;
+                    }
+                }
+            }
+        }
+
+        // ② pawn checks
+        let enemy_pawns = self.pawns() & self.occupancy(!us);
+        checkers |= PAWN_ATTACKS[us as usize][king_sq] & enemy_pawns;
+
+        // ③ knight checks
+        let enemy_knights = self.knights() & self.occupancy(!us);
+        checkers |= KNIGHT_MOVES[king_sq] & enemy_knights;
+
+        StateInfo {
+            checkers,
+            blockers_for_king,
+            pinners,
+        }
+    }
+
+
     pub fn square_under_attack(&self, sq: u8, by: Color) -> bool {
         let enemies = self.occupancy(by);
 
@@ -329,8 +396,53 @@ impl Position {
         self.piece_list[Piece::King as usize][color as usize][0]
     }
 
-    pub fn get_allied(&self, piece: Piece) -> u64 {
+    pub fn get_allies(&self, piece: Piece) -> u64 {
         self.piece_bitboards[piece as usize]&self.color_bitboards[self.turn as usize]
+    }
+
+    pub fn get_enemies(&self, piece: Piece) -> u64 {
+        self.piece_bitboards[piece as usize]&self.color_bitboards[!self.turn as usize]
+    }
+
+    pub fn piece_bb(&self, piece: Piece, color: Color) -> u64 {
+        let color_bb = self.occupancy(color);
+        match piece {
+            Piece::Pawn => self.pawns() & color_bb,
+            Piece::Knight => self.knights() & color_bb,
+            Piece::Bishop => self.bishops() & color_bb,
+            Piece::Rook => self.rooks() & color_bb,
+            Piece::Queen => self.queens() & color_bb,
+            Piece::King => self.kings() & color_bb,
+        }
+    }
+
+    pub fn print_board(&self) {
+        println!();
+        for rank in (0..8).rev() {
+            print!("{} ", rank + 1);
+            for file in 0..8 {
+                let sq = rank * 8 + file;
+                let piece = self.board[sq as usize];
+                let symbol = if piece == EMPTY_PIECE {
+                    '.'
+                } else {
+                    let (p, c) = decode_piece(piece).unwrap();
+                    let ch = match p {
+                        Piece::Pawn => 'p',
+                        Piece::Knight => 'n',
+                        Piece::Bishop => 'b',
+                        Piece::Rook => 'r',
+                        Piece::Queen => 'q',
+                        Piece::King => 'k',
+                    };
+                    if c.is_white() { ch.to_ascii_uppercase() } else { ch }
+                };
+                print!("{} ", symbol);
+            }
+            println!();
+        }
+        println!("  a b c d e f g h");
+        println!();
     }
 }
 

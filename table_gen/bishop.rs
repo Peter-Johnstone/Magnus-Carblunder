@@ -1,11 +1,14 @@
 use crate::table_gen::bitboards;
 
 // ── static helpers ───────────────────────────────────────────────────────
-pub(crate) const BISHOP_MASKS: [u64; 64] = generate_bishop_masks();
+pub(crate) const BISHOP_MASKS: [u64; 64] = generate_bishop_masks().0;
+pub(crate) const BISHOP_RAYS: [[u64; 64]; 4] = generate_bishop_masks().1;
 
-pub const fn generate_bishop_masks() -> [u64; 64] {
-    const DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+pub const fn generate_bishop_masks() -> ([u64; 64], [[u64; 64]; 4]) {
+    const DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, -1), (-1, 1)];
     let mut masks = [0u64; 64];
+    let mut rays = [[0u64; 64]; 4]; // 4 directional rays NE, SE, SW, NW
+
 
     let mut sq = 0u8;
     while sq < 64 {
@@ -23,9 +26,15 @@ pub const fn generate_bishop_masks() -> [u64; 64] {
 
             // stop one square before the edge (file 0/7 or rank 0/7)
             while f > 0 && f < 7 && r > 0 && r < 7 {
+                rays[d][sq as usize] |= 1u64 << (r * 8 + f) as u64;
                 mask |= 1u64 << (r * 8 + f) as u64;
                 f += df;
                 r += dr;
+            }
+
+            // final square gets added to the rays, but not mask
+            if f >= 0 && f <= 7 && r >= 0 && r <= 7 {
+                rays[d][sq as usize] |= 1u64 << (r * 8 + f) as u64;
             }
             d += 1;
         }
@@ -33,7 +42,7 @@ pub const fn generate_bishop_masks() -> [u64; 64] {
         masks[sq as usize] = mask;
         sq += 1;
     }
-    masks
+    (masks, rays)
 }
 
 
@@ -51,7 +60,6 @@ pub fn compute_bishop_attack(sq: u8, blockers: u64) -> u64 {
     ];
 
     for &(step, edge_file) in &DIRS {
-        let mut pos = sq as i8 + step;
         // ---------- compute_bishop_attack ---------------------------------------
         let mut pos = sq as i8;
         loop {

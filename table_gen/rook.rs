@@ -2,6 +2,7 @@ use crate::table_gen::bitboards;
 
 // ── static helpers ───────────────────────────────────────────────────────
 pub(crate) const ROOK_MASKS: [u64; 64] = generate_rook_masks();
+pub(crate) const ROOK_RAYS: [[u64; 64]; 4] = generate_rook_rays();
 
 const fn generate_rook_masks() -> [u64; 64] {
     let mut boards = [0u64; 64];
@@ -24,6 +25,36 @@ const fn generate_rook_masks() -> [u64; 64] {
         sq += 1;
     }
     boards
+}
+
+const fn generate_rook_rays() -> [[u64; 64]; 4] {
+    const DIRS: [(i8, i8); 4] = [(0, 1), (1, 0), (0, -1), (-1, 0)];
+
+    let mut rays = [[0u64; 64]; 4]; // 4 directional rays N E S W
+
+    let mut sq = 0u8;
+    while sq < 64 {
+        let file = (sq % 8) as i8;
+        let rank = (sq / 8) as i8;
+
+        // loop over the four directions
+        let mut d = 0;
+        while d < 4 {
+            let (df, dr) = DIRS[d];
+            let mut f = file + df;
+            let mut r = rank + dr;
+
+            // stop one square before the edge (file 0/7 or rank 0/7)
+            while f >= 0 && f <= 7 && r >= 0 && r <= 7 {
+                rays[d][sq as usize] |= 1u64 << (r * 8 + f) as u64;
+                f += df;
+                r += dr;
+            }
+            d += 1;
+        }
+        sq += 1;
+    }
+    rays
 }
 
 pub(crate) fn compute_rook_attack(sq: u8, blockers: u64) -> u64 {

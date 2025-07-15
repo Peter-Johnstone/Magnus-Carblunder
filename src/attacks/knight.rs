@@ -1,5 +1,5 @@
-use crate::attacks::tables::{KNIGHT_MOVES};
-use crate::bitboards;
+use crate::attacks::tables::{KNIGHT_MOVES, PAWN_ATTACKS};
+use crate::bitboards::pop_lsb;
 use crate::color::Color;
 use crate::mov::{Move, MoveFlags, MoveKind, MoveList};
 use crate::piece::Piece;
@@ -13,12 +13,21 @@ pub (in crate::attacks) fn knight_moves(position: &Position, allies: u64, enemie
         let quiet = all & !enemies;
         let capture = all & enemies;
 
-        bitboards::pop_lsb(quiet, |to| {
+        pop_lsb(quiet, |to| {
             moves.push(Move::encode(from, to, MoveFlags::new(MoveKind::Quiet)));
         });
 
-        bitboards::pop_lsb(capture, |to| {
+        pop_lsb(capture, |to| {
             moves.push(Move::encode(from, to, MoveFlags::new(MoveKind::Capture)));
         });
     }
+}
+
+pub fn knight_attacks(position: &Position, color: Color) -> u64{
+    let mut attacks: u64 = 0;
+    let knights = position.piece_bb(Piece::Knight, color);
+    pop_lsb(knights, |sq| {
+        attacks |= KNIGHT_MOVES[sq as usize];
+    });
+    attacks
 }

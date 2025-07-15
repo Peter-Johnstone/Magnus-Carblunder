@@ -1,36 +1,35 @@
-use crate::attacks::tables::{KING_MOVES};
+use crate::attacks::tables::KING_MOVES;
 use crate::color::Color;
 use crate::mov::{Move, MoveFlags, MoveKind, MoveList};
 use crate::position::Position;
 use crate::bitboards::pop_lsb;
-use crate::piece::EMPTY_PIECE;
+use crate::piece::{Piece, EMPTY_PIECE};
 
-pub (in crate::attacks) fn king_moves(position: &Position, allies: u64, enemies: u64, us: Color, moves: &mut MoveList) {
+pub (in crate::attacks) fn king_moves(position: &Position, allies: u64, enemies: u64, unsafe_squares: u64, us: Color, moves: &mut MoveList) {
     let sq: u8 = position.king_square(us);
-    let to_bb: u64 = KING_MOVES[sq as usize]&!allies;
+    let to_bb: u64 = KING_MOVES[sq as usize] & !allies & !unsafe_squares;
     let capture_bb: u64 = to_bb & enemies;
     let quiet_bb: u64 = to_bb & !capture_bb;
 
-    push_if_safe(position, us, sq, quiet_bb, MoveKind::Quiet, moves);
-    push_if_safe(position, us, sq, capture_bb, MoveKind::Capture, moves);
-    
-    if can_castle_queenside(position, us) {
-        moves.push(Move::encode(sq, sq - 2, MoveFlags::new(MoveKind::Castling)));
-    }
 
-    if can_castle_kingside(position, us) {
-        moves.push(Move::encode(sq, sq + 2, MoveFlags::new(MoveKind::Castling)));
-    }
-}
+    pop_lsb(quiet_bb, |to| {moves.push(Move::encode(sq, to, MoveFlags::new(MoveKind::Quiet)));});
+    pop_lsb(capture_bb, |to| {moves.push(Move::encode(sq, to, MoveFlags::new(MoveKind::Capture)));});
 
+    let in_check = (unsafe_squares & (1u64 << sq)) != 0;
 
-fn push_if_safe(position: &Position, us: Color, from: u8, to_bb: u64, kind: MoveKind, moves: &mut MoveList) {
-    pop_lsb(to_bb, |to| {
-        if !position.square_under_attack(to, !us) {
-            moves.push(Move::encode(from, to, MoveFlags::new(kind)));
+    if in_check {
+        // check castling
+        if can_castle_queenside(position, us) {
+            moves.push(Move::encode(sq, sq - 2, MoveFlags::new(MoveKind::Castling)));
         }
-    });
+
+        if can_castle_kingside(position, us) {
+            moves.push(Move::encode(sq, sq + 2, MoveFlags::new(MoveKind::Castling)));
+        }
+    }
 }
+
+
 fn can_castle_kingside(position: &Position, us: Color) -> bool {
     let (between, king_path) = match us {
         Color::White => ([5, 6], [5, 6]),
@@ -84,4 +83,10 @@ fn can_castle_queenside(position: &Position, us: Color) -> bool {
     }
 
     true
+}
+
+
+
+pub fn king_attacks(position: &Position, color: Color) -> u64 {
+    KING_MOVES[position.king_square(color) as usize]
 }
