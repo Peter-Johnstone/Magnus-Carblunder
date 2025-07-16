@@ -1,10 +1,8 @@
 use std::str::SplitWhitespace;
-use crate::attacks::movegen::all_attacks;
 use crate::attacks::sliding::{diagonal_attacks, orthogonal_attacks};
 use crate::castling_rights::CastlingRights;
 use crate::color::Color;
 use crate::attacks::tables::{KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS, RAYS};
-use crate::bitboards::print_bitboard;
 use crate::mov::{Move, MoveKind};
 use crate::direction::Dir;
 use crate::piece::{decode_piece, encode_piece, EncodedPiece, Piece, EMPTY_PIECE};
@@ -234,59 +232,60 @@ impl Position {
         let rooks   = self.rooks()   & self.occupancy(!us);
         let bishops = self.bishops() & self.occupancy(!us);
         let queens  = self.queens()  & self.occupancy(!us);
-        let ortho_sliders = rooks  | queens;
-        let diag_sliders  = bishops| queens;
+        let ortho_sliders = rooks | queens;
+        let diag_sliders  = bishops | queens;
 
-        let mut checkers           = 0u64;
-        let mut blockers_for_king  = 0u64;
-        let mut pinners            = 0u64;
+        let mut checkers          = 0u64;
+        let mut blockers_for_king = 0u64;
+        let mut pinners           = 0u64;
 
-        // ① ray‑based checks and pins
         for dir in Dir::ALL {
             // pieces (friend+foe) in that direction
             let mut ray = RAYS[dir.idx()][king_sq] & occ;
             if ray == 0 { continue; }
 
-            let first_sq  = ray.trailing_zeros() as u8;
-            let first_bb  = 1u64 << first_sq;
-            let sliders   = if dir.is_ortho() { ortho_sliders } else { diag_sliders };
+            // isolate nearest piece on the ray
+            let first_bb = if dir.is_positive() {        // N, NE, E, NW
+                ray & ray.wrapping_neg()                 // LS1B
+            } else {                                     // S, SW, W, SE
+                1u64 << (63 - ray.leading_zeros())       // MS1B
+            };
+            let first_sq = first_bb.trailing_zeros() as u8;    // BSF works either way
+            let sliders  = if dir.is_ortho() { ortho_sliders } else { diag_sliders };
 
-            // Always test the *first* piece for a direct check
+            // ① direct check?
             if first_bb & sliders != 0 {
                 checkers |= first_bb;
-                // Don’t continue; a checking slider blocks any pin behind it
-                continue;
+                continue;                                // nothing behind a checker matters
             }
 
-            // If the first piece is OURS it may be pinned
+            // ② maybe pinned?
             if first_bb & self.occupancy(us) != 0 {
-                ray &= ray - 1;              // pop first piece
+                ray ^= first_bb;                         // drop the first blocker
                 if ray != 0 {
-                    let second_sq = ray.trailing_zeros() as u8;
-                    let second_bb = 1u64 << second_sq;
+                    let second_bb = if dir.is_positive() {
+                        ray & ray.wrapping_neg()
+                    } else {
+                        1u64 << (63 - ray.leading_zeros())
+                    };
                     if second_bb & sliders != 0 {
-                        // first_bb is the single blocker ==> pinned
-                        blockers_for_king |= first_bb;
-                        pinners           |= second_bb;
+                        blockers_for_king |= first_bb;   // our piece is absolutely pinned
+                        pinners           |= second_bb;  // pinning slider
                     }
                 }
             }
         }
 
-        // ② pawn checks
-        let enemy_pawns = self.pawns() & self.occupancy(!us);
-        checkers |= PAWN_ATTACKS[us as usize][king_sq] & enemy_pawns;
-
-        // ③ knight checks
+        // ③ pawn and knight checks
+        let enemy_pawns   = self.pawns()   & self.occupancy(!us);
         let enemy_knights = self.knights() & self.occupancy(!us);
-        checkers |= KNIGHT_MOVES[king_sq] & enemy_knights;
 
-        StateInfo {
-            checkers,
-            blockers_for_king,
-            pinners,
-        }
+        checkers |= PAWN_ATTACKS[us as usize][king_sq] & enemy_pawns;
+        checkers |= KNIGHT_MOVES[king_sq]              & enemy_knights;
+
+        StateInfo { checkers, blockers_for_king, pinners }
     }
+
 
 
     pub fn square_under_attack(&self, sq: u8, by: Color) -> bool {

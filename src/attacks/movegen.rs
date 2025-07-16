@@ -1,8 +1,9 @@
 use crate::attacks::king::{king_attacks, king_moves};
-use crate::attacks::knight::{knight_attacks, knight_moves};
+use crate::attacks::knight::{knight_attacks, knight_moves, knight_moves_evasion};
 use crate::attacks::pawn::{pawn_attacks, pawn_moves, pawn_moves_evasion};
-use crate::attacks::sliding::{bishop_attacks, bishop_moves, queen_attacks, queen_moves, rook_attacks, rook_moves};
+use crate::attacks::sliding::{bishop_attacks, bishop_moves, bishop_moves_evasion, queen_attacks, queen_moves, queen_moves_evasion, rook_attacks, rook_moves, rook_moves_evasion};
 use crate::attacks::tables::{BETWEEN_EXCLUSIVE};
+use crate::bitboards::print_bitboard;
 use crate::mov::MoveList;
 use crate::color::Color;
 use crate::position::{StateInfo, Position};
@@ -17,7 +18,7 @@ pub fn all_moves(position: &Position) -> MoveList {
     let mut moves = MoveList::new();
 
     let info = position.compute_pins_checks(us);
-    let pinned = info.blockers_for_king() & position.occupancy(us);
+    print_bitboard(info.checkers());
     let in_check = info.is_check();
 
     let unsafe_squares = all_attacks(position, !us);
@@ -26,7 +27,7 @@ pub fn all_moves(position: &Position) -> MoveList {
     } else if info.is_double_check() {
         king_moves(position, allies, enemies, unsafe_squares, us, &mut moves);
     } else {
-        check_evasions(position, allies, enemies, unsafe_squares, &info, us, info, &mut moves);
+        check_evasions(position, allies, enemies, unsafe_squares, &info, us, &mut moves);
     }
     moves
 }
@@ -34,21 +35,17 @@ pub fn all_moves(position: &Position) -> MoveList {
 pub fn all_pseudolegal_moves(position: &Position, allies: u64, enemies: u64, unsafe_squares: u64, us: Color, info: &StateInfo, moves: &mut MoveList) {
     pawn_moves(position, enemies, info, us, moves);
     king_moves(position, allies, enemies, unsafe_squares, us, moves);
-    knight_moves(position, allies, enemies, us, moves);
-    bishop_moves(position, allies, enemies, us, moves);
-    rook_moves(position, allies, enemies, us, moves);
-    queen_moves(position, allies, enemies, us, moves);
+    knight_moves(position, allies, enemies, info, us, moves);
+    bishop_moves(position, info, allies, enemies, us, moves);
+    rook_moves(position, info, allies, enemies, us, moves);
+    queen_moves(position, info, allies, enemies, us, moves);
 }
 
-pub fn check_evasions(position: &Position, allies: u64, enemies: u64, unsafe_squares: u64, info: &StateInfo, us: Color, tactics: StateInfo, moves: &mut MoveList) {
+pub fn check_evasions(position: &Position, allies: u64, enemies: u64, unsafe_squares: u64, info: &StateInfo, us: Color, moves: &mut MoveList) {
     // If we get to this point, there's only one checker
 
-    let checker_bb = tactics.checkers();
-    let checker_sq = checker_bb.trailing_zeros() as u8;
-    let king_sq = position.king_square(us);
-
     // Single check
-    let checker_bb = tactics.checkers();
+    let checker_bb = info.checkers();
     let checker_sq = checker_bb.trailing_zeros() as u8;
     let checker_bb = 1u64 << checker_sq;
 
@@ -61,10 +58,10 @@ pub fn check_evasions(position: &Position, allies: u64, enemies: u64, unsafe_squ
     pawn_moves_evasion(position, info, enemies, block_mask, checker_bb, us, moves);
     block_mask |= checker_bb;
 
-    // knight_moves_evasion(position, allies, enemies, us, pinned, block_mask, moves);
-    // bishop_moves_evasion(position, allies, enemies, us, pinned, block_mask, moves);
-    // rook_moves_evasion(position, allies, enemies, us, pinned, block_mask, moves);
-    // queen_moves_evasion(position, allies, enemies, us, pinned, block_mask, moves);
+    knight_moves_evasion(position, info, enemies, block_mask, us, moves);
+    bishop_moves_evasion(position, info, allies, enemies, block_mask, us, moves);
+    rook_moves_evasion(position, info, allies, enemies, block_mask, us, moves);
+    queen_moves_evasion(position, info, allies, enemies, block_mask, us, moves);
 
     king_moves(position, allies, enemies, unsafe_squares, us, moves);
 }

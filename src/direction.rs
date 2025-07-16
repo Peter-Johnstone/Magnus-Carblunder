@@ -12,4 +12,11 @@ impl Dir {
 
     #[inline(always)]
     pub fn is_ortho(self) -> bool { self as u8 <= Dir::W as u8 } // first 4 are orthogonal
+
+    pub fn is_positive(self) -> bool {
+        (self as u8 == Dir::N as u8) |
+            (self as u8 == Dir::NE as u8) |
+            (self as u8 == Dir::E as u8) |
+            (self as u8 == Dir::NW as u8)
+    }
 }
