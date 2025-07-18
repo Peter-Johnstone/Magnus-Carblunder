@@ -1,7 +1,7 @@
 
 mod king;
 mod pawn;
-pub(crate) mod movegen;
+pub mod movegen;
 mod knight;
 pub mod sliding;
 pub mod tables;

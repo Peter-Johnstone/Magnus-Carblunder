@@ -2,8 +2,7 @@ use crate::attacks::king::{king_attacks, king_moves};
 use crate::attacks::knight::{knight_attacks, knight_moves, knight_moves_evasion};
 use crate::attacks::pawn::{pawn_attacks, pawn_moves, pawn_moves_evasion};
 use crate::attacks::sliding::{bishop_attacks, bishop_moves, bishop_moves_evasion, queen_attacks, queen_moves, queen_moves_evasion, rook_attacks, rook_moves, rook_moves_evasion};
-use crate::attacks::tables::{BETWEEN_EXCLUSIVE};
-use crate::bitboards::print_bitboard;
+use crate::attacks::tables::{BETWEEN_EXCLUSIVE, LINE_BB};
 use crate::mov::MoveList;
 use crate::color::Color;
 use crate::position::{StateInfo, Position};
@@ -11,21 +10,17 @@ use crate::position::{StateInfo, Position};
 
 
 pub fn all_moves(position: &Position) -> MoveList {
-
     let us: Color = position.turn();
     let allies: u64 = position.occupancy(us);
     let enemies: u64 = position.occupancy(!us);
     let mut moves = MoveList::new();
 
     let info = position.compute_pins_checks(us);
-    print_bitboard(info.checkers());
     let in_check = info.is_check();
 
     let unsafe_squares = all_attacks(position, !us);
     if !in_check {
         all_pseudolegal_moves(position, allies, enemies, unsafe_squares, us, &info, &mut moves);
-    } else if info.is_double_check() {
-        king_moves(position, allies, enemies, unsafe_squares, us, &mut moves);
     } else {
         check_evasions(position, allies, enemies, unsafe_squares, &info, us, &mut moves);
     }
@@ -42,14 +37,17 @@ pub fn all_pseudolegal_moves(position: &Position, allies: u64, enemies: u64, uns
 }
 
 pub fn check_evasions(position: &Position, allies: u64, enemies: u64, unsafe_squares: u64, info: &StateInfo, us: Color, moves: &mut MoveList) {
-    // If we get to this point, there's only one checker
-
-    // Single check
+    let king_sq = position.king_square(us);
     let checker_bb = info.checkers();
+
+    king_moves(position, allies, enemies, unsafe_squares | slider_xray_blockers(position, king_sq, checker_bb), us, moves);
+
+    if info.is_double_check() {
+        return
+    }
+
     let checker_sq = checker_bb.trailing_zeros() as u8;
     let checker_bb = 1u64 << checker_sq;
-
-    let king_sq = position.king_square(us);
 
     // Squares we can block the check on (between king and slider)
     let mut block_mask = BETWEEN_EXCLUSIVE[king_sq as usize][checker_sq as usize];
@@ -63,7 +61,28 @@ pub fn check_evasions(position: &Position, allies: u64, enemies: u64, unsafe_squ
     rook_moves_evasion(position, info, allies, enemies, block_mask, us, moves);
     queen_moves_evasion(position, info, allies, enemies, block_mask, us, moves);
 
-    king_moves(position, allies, enemies, unsafe_squares, us, moves);
+
+}
+
+
+/// Squares the king may NOT step on because they lie on the same
+/// ray as `king_sq` and a *sliding* checker (rook, bishop, queen).
+#[inline]
+fn slider_xray_blockers(position: &Position, king_sq: u8, checkers: u64) -> u64 {
+    let mut mask = 0u64;
+    let mut bb   = checkers;
+
+    while bb != 0 {
+        let sq = bb.trailing_zeros() as u8;
+        bb &= bb - 1;                       // pop least‑sig bit
+
+        if position.is_slider(sq) {
+            // all squares on the ray between king and this checker,
+            // but NOT the square the checker currently occupies
+            mask |= LINE_BB[king_sq as usize][sq as usize] & !(1u64 << sq);
+        }
+    }
+    mask
 }
 
 pub fn all_attacks(position: &Position, color: Color) -> u64 {

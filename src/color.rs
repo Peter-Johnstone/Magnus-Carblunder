@@ -1,6 +1,6 @@
 use std::ops::Not;
 #[derive(Default, Debug, Copy, Clone, PartialEq)]
-pub(crate) enum Color {
+pub enum Color {
     #[default]
     White = 0,
     Black = 1

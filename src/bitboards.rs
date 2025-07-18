@@ -20,6 +20,7 @@ pub(crate) fn pop_lsb(mut bb: u64, mut f: impl FnMut(u8)) {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn print_bitboard(bb: u64) {
     for rank in (0..8).rev() {
 

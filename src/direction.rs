@@ -1,10 +1,10 @@
 #[derive(Copy, Clone, Debug)]
 #[repr(u8)]                     // lets us cast to usize cheaply
-pub(crate) enum Dir { N, E, S, W, NE, NW, SE, SW }
+pub(crate) enum Dir { N, E, S, W, NE, SE, SW, NW  }
 
 impl Dir {
     pub const ALL: [Dir; 8] = [
-        Dir::N, Dir::E, Dir::S, Dir::W, Dir::NE, Dir::NW, Dir::SE, Dir::SW,
+        Dir::N, Dir::E, Dir::S, Dir::W, Dir::NE, Dir::SE, Dir::SW, Dir::NW
     ];
 
     #[inline(always)]

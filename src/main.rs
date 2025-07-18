@@ -1,6 +1,6 @@
 use macroquad::prelude::*;
 
-use Chess::game_controller::GameController;
+use chess::game_controller::GameController;
 
 pub fn window_conf() -> Conf {
     Conf {

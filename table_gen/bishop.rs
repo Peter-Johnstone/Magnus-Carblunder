@@ -59,7 +59,7 @@ pub fn compute_bishop_attack(sq: u8, blockers: u64) -> u64 {
         ( -9, 0),  // SW: stop when we’re on a-file
     ];
 
-    for &(step, edge_file) in &DIRS {
+    for &(step, _) in &DIRS {
         // ---------- compute_bishop_attack ---------------------------------------
         let mut pos = sq as i8;
         loop {
@@ -118,16 +118,18 @@ pub const BISHOP_MAGICS: [u64; 64] = [
     0x0000000010020200, 0x0000000404080200, 0x0000040404040400,
     0x0002020202020200,
 ];
-pub const BISHOP_SHIFTS: [u8; 64] = [
-    58, 59, 59, 59, 59, 59, 59, 58,
+pub const BISHOP_SHIFTS: [u8; 64] = [58, 59, 59, 59, 59, 59, 59, 58,
     59, 59, 59, 59, 59, 59, 59, 59,
     59, 59, 57, 57, 57, 57, 59, 59,
     59, 59, 57, 55, 55, 57, 59, 59,
     59, 59, 57, 55, 55, 57, 59, 59,
     59, 59, 57, 57, 57, 57, 59, 59,
     59, 59, 59, 59, 59, 59, 59, 59,
-    59, 59, 58, 59, 59, 59, 59, 59,
+    58, 59, 59, 59, 59, 59, 59, 58
 ];
+
+
+
 pub(crate) fn build_bishop_table() -> Vec<[u64; 512]> {
     let masks = BISHOP_MASKS;                    // 64 × u64, tiny
     let mut table: Vec<[u64; 512]> = Vec::with_capacity(64);
@@ -146,5 +148,16 @@ pub(crate) fn build_bishop_table() -> Vec<[u64; 512]> {
 
         table.push(row);                       // each row copied once
     }
+
     table
+}
+fn gen_bishop_shifts() -> [u8; 64] {
+    let masks = BISHOP_MASKS;
+    let mut out = [0u8; 64];
+    let mut i = 0;
+    while i < 64 {
+        out[i] = 64 - masks[i].count_ones() as u8;
+        i += 1;
+    }
+    out
 }

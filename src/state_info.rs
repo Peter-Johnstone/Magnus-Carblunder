@@ -1,5 +1,4 @@
 use crate::attacks::tables::{BETWEEN_EXCLUSIVE, BETWEEN_INCLUSIVE, LINE_BB};
-use crate::bitboards::print_bitboard;
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct StateInfo {
@@ -22,21 +21,45 @@ impl StateInfo {
 
     #[inline]
     pub fn pin_ray(king_sq: usize, from_sq: usize, pinners: u64) -> u64 {
-
-        // Line between king and the candidate piece
+        // Bitboard of the whole infinite line through king and from_sq
         let line = LINE_BB[king_sq][from_sq];
-        // If no pinner lies on that line => piece is not pinned
-        let slider_on_line = pinners & line;
-        if slider_on_line == 0 {
-            return 0;
+
+        // Sliders that sit somewhere on that line
+        let sliders_on_line = line & pinners;
+        if sliders_on_line == 0 {
+            return 0;                                     // ❶ no pin possible
         }
 
-        // Find the slider that lies on the same ray (there is exactly one)
-        let pinner_sq = slider_on_line.trailing_zeros() as usize;
-        print_bitboard(BETWEEN_INCLUSIVE[king_sq][pinner_sq]);
-        // Full pin ray = king ↔ pinner (inclusive)
+        // Does the ray go towards larger square numbers or smaller ones?
+        let forward = from_sq > king_sq;
+
+        // Keep only bits **beyond the piece** in the forward direction
+        // ‒ if forward → greater square indices
+        // ‒ else       → smaller square indices
+        let mask_after_piece = if forward {
+            // bits > from_sq
+            sliders_on_line & (!0u64).wrapping_shl((from_sq + 1) as u32)
+        } else {
+            // bits < from_sq
+            sliders_on_line & ((1u64 << from_sq) - 1)
+        };
+
+        if mask_after_piece == 0 {
+            return 0;                                     // ❷ no slider between piece and edge
+        }
+
+        // First pinner in that direction: LS1B if forward, MS1B if backward
+        let pinner_sq = if forward {
+            mask_after_piece.trailing_zeros() as usize
+        } else {
+            63 - mask_after_piece.leading_zeros() as usize
+        };
+
+        // Return king‑to‑pinner ray (inclusive)
         BETWEEN_INCLUSIVE[king_sq][pinner_sq]
     }
+
+
 
 
     pub fn blockers_for_king(&self) -> u64 {
@@ -46,7 +69,6 @@ impl StateInfo {
     pub fn is_check(&self) -> bool {
         self.checkers.count_ones() >= 1
     }
-
 
     pub fn is_double_check(&self) -> bool {
         self.checkers.count_ones() >= 2

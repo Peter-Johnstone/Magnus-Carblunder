@@ -1,6 +1,6 @@
 use crate::color::Color;
 use crate::attacks::tables::{BISHOP_ATTACKS, BISHOP_MAGICS, BISHOP_MASKS, BISHOP_SHIFTS, ROOK_ATTACKS, ROOK_MAGICS, ROOK_MASKS, ROOK_SHIFTS};
-use crate::bitboards::{pop_lsb, FULL_BB};
+use crate::bitboards::{pop_lsb, print_bitboard, FULL_BB};
 use crate::mov::{Move, MoveFlags, MoveKind, MoveList};
 use crate::piece::Piece;
 use crate::position::{Position, StateInfo};
@@ -59,14 +59,13 @@ pub fn diagonal_attacks(sq: usize, occupied: u64) -> u64 {
     let blockers: u64 = BISHOP_MASKS[sq] & occupied;
     let idx: usize = ((blockers.wrapping_mul(BISHOP_MAGICS[sq]))
         >> BISHOP_SHIFTS[sq]) as usize;
-
     let row: &[u64; 512] = &BISHOP_ATTACKS[sq];
     row[idx]
+
 }
 
 fn diagonal_moves(allies: u64, enemies: u64, move_mask: u64, moves: &mut MoveList, sq: u8) {
     let attacks: u64 = diagonal_attacks(sq as usize, allies | enemies) & !allies & move_mask;
-
     let quiet_bb: u64 = attacks & !enemies;
     let capture_bb: u64 = attacks & enemies;
 

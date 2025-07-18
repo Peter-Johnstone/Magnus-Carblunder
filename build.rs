@@ -1,6 +1,5 @@
 use std::{
     fs::{self},
-    io::Write,
     path::{Path},
 };
 use crate::table_gen::between_exclusive::BETWEEN_EXCLUSIVE;
@@ -20,7 +19,6 @@ fn write_if_changed(path: &Path, new_content: &str) {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-
     let dir = Path::new("table_gen");
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {

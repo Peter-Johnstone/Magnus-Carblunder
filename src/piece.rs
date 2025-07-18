@@ -11,6 +11,19 @@ pub enum Piece {
     King   = 5,   // 0b0101
 }
 
+impl Piece {
+    pub fn piece_initial(self) -> char {
+        match  { self } {
+            Piece::Pawn => 'p',
+            Piece::Knight => 'n',
+            Piece::Bishop => 'b',
+            Piece::Rook   => 'r',
+            Piece::Queen  => 'q',
+            Piece::King   => 'k',
+        }
+    }
+}
+
 
 
 pub type EncodedPiece = u8;

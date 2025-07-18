@@ -14,7 +14,8 @@ pub struct GameController {
 
 impl GameController {
     pub async fn new() -> Self {
-        let position = Position::load_position_from_fen("rnbqkbnr/pppp1ppp/8/8/8/4K3/PPPP1PPP/RNBQ1BNR b kq - 0 0");
+        let position = Position::load_position_from_fen("B6b/8/8/8/2K5/4k3/8/b6B w - -");
+        //let position = Position::start();
         let gui = GuiState::new().await;
         Self { position, gui, selected_moves: MoveList::new() }
     }
@@ -33,11 +34,19 @@ impl GameController {
             if (1u64 << square) & self.position.occupancy(self.position.turn()) != 0 {
                 self.selected_moves = all_moves(&self.position).moves_from_square(square);
             } else {
-                if let Some(&mov) = self.selected_moves.iter().find(|m| m.to() == square) {
+                if let Some(mov) = self.selected_moves.iter().find(|m| m.to() == square) {
                     self.position.do_move(mov);
                 }
                 self.selected_moves = MoveList::new(); // clear
             }
+        }
+        if is_key_pressed(KeyCode::U) {
+            self.position.undo_move()
+        }
+
+        if is_key_pressed(KeyCode::C) {
+            println!("Asserting consistency!");
+            println!("Consistent? {}", self.position.is_consistent());
         }
 
         // handle inputs, update position, etc.

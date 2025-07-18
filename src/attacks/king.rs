@@ -2,8 +2,8 @@ use crate::attacks::tables::KING_MOVES;
 use crate::color::Color;
 use crate::mov::{Move, MoveFlags, MoveKind, MoveList};
 use crate::position::Position;
-use crate::bitboards::pop_lsb;
-use crate::piece::{Piece, EMPTY_PIECE};
+use crate::bitboards::{pop_lsb};
+use crate::piece::{EMPTY_PIECE};
 
 pub (in crate::attacks) fn king_moves(position: &Position, allies: u64, enemies: u64, unsafe_squares: u64, us: Color, moves: &mut MoveList) {
     let sq: u8 = position.king_square(us);
@@ -15,9 +15,10 @@ pub (in crate::attacks) fn king_moves(position: &Position, allies: u64, enemies:
     pop_lsb(quiet_bb, |to| {moves.push(Move::encode(sq, to, MoveFlags::new(MoveKind::Quiet)));});
     pop_lsb(capture_bb, |to| {moves.push(Move::encode(sq, to, MoveFlags::new(MoveKind::Capture)));});
 
+    
     let in_check = (unsafe_squares & (1u64 << sq)) != 0;
 
-    if in_check {
+    if !in_check {
         // check castling
         if can_castle_queenside(position, us) {
             moves.push(Move::encode(sq, sq - 2, MoveFlags::new(MoveKind::Castling)));

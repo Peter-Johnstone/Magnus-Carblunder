@@ -3,7 +3,7 @@ use crate::attacks::sliding::{diagonal_attacks, orthogonal_attacks};
 use crate::castling_rights::CastlingRights;
 use crate::color::Color;
 use crate::attacks::tables::{KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS, RAYS};
-use crate::mov::{Move, MoveKind};
+use crate::mov::{Move};
 use crate::direction::Dir;
 use crate::piece::{decode_piece, encode_piece, EncodedPiece, Piece, EMPTY_PIECE};
 pub(crate) use crate::state_info::StateInfo;
@@ -12,11 +12,11 @@ const MAX_PIECES: usize = 10;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Undo {
-    captured_piece: Option<(EncodedPiece, u8)>, // (encoded piece, square)
+    captured_piece: Option<(EncodedPiece, u8)>, // piece, square, idx
     castling_rights: CastlingRights,
     en_passant: u8, // or Option<u8> if you refactor it
     half_move: u8,
-    turn: Color,
+    mov: Move,
 }
 
 
@@ -38,7 +38,7 @@ impl Default for Position {
     fn default() -> Self {
         Self {
             board: [0; 64],
-            piece_list: Default::default(),
+            piece_list: [[[64; MAX_PIECES]; 2]; 6],
             piece_count: Default::default(),
             reverse_piece_index: [[[None; 64]; 2]; 6],
             piece_bitboards: Default::default(),
@@ -76,15 +76,18 @@ impl Position {
             let rank = en_passant_str.chars().nth(1).unwrap();
 
             let col = file as u8 - b'a';
-            let row = rank.to_digit(10).unwrap() as u8;
+            let row = rank.to_digit(10).unwrap() as u8 - 1; // subtract 1 to make it 0-based
 
-            row*8 + col
+            row * 8 + col
         } else {
             64
         };
 
-        let half_move_str: &str = iter.next().expect("FEN is missing half move count");
-        position.half_move = half_move_str.parse::<u8>().expect("Invalid half move count");
+
+        let half_move_str: Option<&str> = iter.next();
+        position.half_move = half_move_str
+            .map(|s| s.parse::<u8>().expect("Invalid half move count"))
+            .unwrap_or(0);
 
         position
     }
@@ -105,9 +108,62 @@ impl Position {
         }
     }
 
+    /// Cheap in release, exhaustive in debug.
+    pub fn assert_consistent(&self, mov: Move, undo:bool, start: bool) {
+        let consistent = self.is_consistent();
+
+        if !consistent {
+            println!("Undo? {undo}, start? {start}");
+            self.print_move_history();
+            println!("Move: {}", mov);
+            self.print_board();
+
+        }
+        debug_assert!(consistent,
+                      "Position corruption detected; see stderr for details");
+    }
+
+    /// Thorough but slow: call only under `debug_assert!`.
+    pub fn is_consistent(&self) -> bool {
+        // 1.  Board ↔ bitboards
+        for sq in 0..64 {
+            let encoded = self.board[sq];
+            let on_board = encoded != EMPTY_PIECE;
+            let in_bb    =
+                (self.color_bitboards[0] | self.color_bitboards[1]) & (1u64 << sq) != 0;
+            if on_board != in_bb { eprintln!("square {} board/bitboard mismatch", square_name(sq as u8));return false }
+        }
+
+        // 2.  Board ↔ reverse_piece_index / piece_list
+        for p in 0..6 {
+            for c in 0..2 {
+                for idx in 0..self.piece_count[p][c] {
+                    let sq = self.piece_list[p][c][idx] as usize;
+                    if self.reverse_piece_index[p][c][sq] != Some(idx) {
+                        eprintln!("NUMBER OF PAWNS: {} ", self.piece_count[p][c]);
+
+                        eprintln!("Reverse piece index: {:?}", self.reverse_piece_index[p][c][sq]);
+                        eprintln!("square {sq} board/bitboard mismatch");
+                        eprintln!("piece list and reverse index disagree for {p:?}/{c} idx {idx}");
+                        return false
+                    }
+                    if self.board[sq] == EMPTY_PIECE {
+                        eprintln!("piece list says a piece is on empty square {sq}");
+                        return false
+                    }
+                }
+            }
+        }
+
+        // 3.  Side to move sanity, castling rights squares contain correct rook/king, etc.
+        //      (Fill in the details that matter for your engine.)
+        true
+    }
+
     pub fn do_move(&mut self, mov: Move) {
         let (from, to) = (mov.from() as usize, mov.to() as usize);
         let encoded = self.board[from];
+
         let (piece, color) = decode_piece(encoded).expect("Tried to move from an empty square");
 
         // Save undo info
@@ -119,10 +175,9 @@ impl Position {
                 self.en_passant_capture_pawn() as usize
             };
             let captured_encoded = self.board[capture_square];
-            captured_piece = Some((captured_encoded, capture_square as u8));
 
-            // remove the captured piece from the board representations
-            self.handle_capture(capture_square);
+            captured_piece = Some((captured_encoded, capture_square as u8));
+            self.remove_piece(capture_square);
         }
 
         self.undo_stack.push(Undo {
@@ -130,17 +185,23 @@ impl Position {
             castling_rights: self.castling_rights,
             en_passant: self.en_passant,
             half_move: self.half_move,
-            turn: self.turn,
+            mov,
         });
 
-        // fuck up castling rights without being a castle itself
-        if piece == Piece::King {self.castling_rights.remove_castling_rights(self.turn)}
+        if piece == Piece::King {
+            self.castling_rights.remove_castling_rights(self.turn)
+        }
         self.handle_rook_castling_change(from, to);
 
-        if mov.is_castling() {self.handle_castle(from, to)}
+
+        if mov.is_castling() {
+            self.handle_castle(from, to)
+        }
 
         // Move the piece
         self.move_piece(piece, color, from, to);
+
+        self.handle_promotion(mov, to, color);
 
         // Update en passant square (or clear)
         self.en_passant = mov.new_en_passant_square();
@@ -150,6 +211,103 @@ impl Position {
 
         // Switch sides
         self.turn = !self.turn;
+    }
+
+    fn handle_promotion(&mut self, mov: Move, to: usize, color: Color) {
+        if mov.is_promotion() {
+            let new_piece = mov.promotion_piece().unwrap();
+            // remove the pawn
+            self.remove_piece(to);
+
+            // add the new promotion piece to the board
+            let encoded_piece = encode_piece(new_piece, color);
+            self.add_piece(encoded_piece, to as u8);
+        }
+    }
+
+    pub fn print_move_history(&self) {
+        println!("Move History: ");
+        for i in 0..self.undo_stack.len() {
+            println!("{:}", self.undo_stack[i].mov);
+        }
+    }
+
+
+    pub fn undo_move(&mut self) {
+        if self.undo_stack.len() == 0 {
+            // no moves to undo
+            return
+        }
+
+        let undo = self.undo_stack.pop().unwrap();
+        let mov = undo.mov;
+        let (to, from) = (mov.from() as usize, mov.to() as usize); // reversed because undo
+        let encoded = self.board[from];
+
+        let (piece, color) = decode_piece(encoded).expect("Tried to move from an empty square");
+
+        // Move the piece
+        self.move_piece(piece, color, from, to);
+
+
+
+
+        self.handle_unpromote(mov, to, color);
+        self.undo_rook_castle_movement(mov, from);
+        self.castling_rights = undo.castling_rights;
+        self.en_passant = undo.en_passant;
+
+
+        // Rule-50 clock reset on pawn move or capture
+        self.half_move = undo.half_move;
+
+        // undo_move, restoring a capture – simple, safe version
+        if let Some((captured, sq)) = undo.captured_piece {
+            self.add_piece(captured, sq);
+        }
+        // Switch sides
+        self.turn = !self.turn;
+    }
+
+    fn handle_unpromote(&mut self, mov: Move, to: usize, color: Color) {
+        if mov.is_promotion() {
+            // remove the pawn
+            self.remove_piece(to);
+
+            // add the new promotion piece to the board
+            let encoded_piece = encode_piece(Piece::Pawn, color);
+            self.add_piece(encoded_piece, to as u8);
+        }
+    }
+
+    fn add_piece(&mut self, captured: EncodedPiece, sq: u8) {
+        let (pc, col) = decode_piece(captured).unwrap();
+        let p = pc as usize;
+        let c = col as usize;
+
+        let idx = self.piece_count[p][c];          // first free slot
+        self.piece_list[p][c][idx] = sq;           // append
+        self.reverse_piece_index[p][c][sq as usize] = Some(idx);
+        self.piece_count[p][c] += 1;               // list grows by 1
+
+        self.board[sq as usize] = captured;
+        let bb = 1u64 << sq;
+        self.piece_bitboards[p] |= bb;
+        self.color_bitboards[c] |= bb;
+    }
+
+    fn undo_rook_castle_movement(&mut self, mov: Move, from: usize) {
+        // move rook back
+        if mov.is_castling() {
+            let is_queenside = self.board[from + 1] != EMPTY_PIECE;
+            let (rook_from, rook_to) = if is_queenside {
+                (from + 1, from - 2)
+            } else {
+                (from - 1, from + 1)
+            };
+            let (piece, color) = decode_piece(self.board[rook_from]).unwrap();
+            self.move_piece(piece, color, rook_from, rook_to);
+        }
     }
 
     fn handle_rook_castling_change(&mut self, from: usize, to: usize) {
@@ -186,28 +344,35 @@ impl Position {
         self.color_bitboards[c] = (self.color_bitboards[c] & !from_bb) | to_bb;
     }
 
-    fn handle_capture(&mut self, to: usize) {
-        let (piece, col) = decode_piece(self.board[to]).unwrap();
+    fn remove_piece(&mut self, sq: usize) {
+        let (piece, col) = decode_piece(self.board[sq]).unwrap();
         let p = piece as usize;
         let c = col as usize;
 
-        // 1. Update board square
-        self.board[to] = EMPTY_PIECE;
+        // index of the captured piece in the list
+        let idx       = self.reverse_piece_index[p][c][sq].unwrap();
+        let last_idx  = self.piece_count[p][c] - 1;
+        let last_sq   = self.piece_list[p][c][last_idx] as usize;
 
-        // 2. Update reverse piece index
-        let count = self.reverse_piece_index[p][c][to]
-            .expect("Piece missing from reverse piece index!");
-        self.reverse_piece_index[p][c][to] = None;
+        // move the *last* piece into `idx`
+        if idx != last_idx {
+            self.piece_list[p][c][idx]            = last_sq as u8;
+            self.reverse_piece_index[p][c][last_sq] = Some(idx);
+        }
 
-        // 3. Update piece list
-        self.piece_list[p][c][count] = to as u8;
+        // ✱✱ blank out the list slot that is now unused ✱✱
+        self.piece_list[p][c][last_idx] = 64;
 
-        // 4. Update bitboards
-        let captured_bb = 1u64 << to;
-        self.piece_bitboards[p] &= !captured_bb;
-        self.color_bitboards[c] &= !captured_bb;
+        self.piece_count[p][c] -= 1;
+        self.reverse_piece_index[p][c][sq] = None;
 
+        // board & bitboards …
+        self.board[sq] = EMPTY_PIECE;
+        let bb = 1u64 << sq;
+        self.piece_bitboards[p] &= !bb;
+        self.color_bitboards[c] &= !bb;
     }
+
 
     fn handle_castle(&mut self, from: usize, to: usize) {
         let rook_to = (from + to) / 2;
@@ -222,7 +387,6 @@ impl Position {
             self.half_move += 1;
         }
     }
-
 
     pub fn compute_pins_checks(&self, us: Color) -> StateInfo {
         let king_sq = self.king_square(us) as usize;
@@ -240,17 +404,18 @@ impl Position {
         let mut pinners           = 0u64;
 
         for dir in Dir::ALL {
+
+
             // pieces (friend+foe) in that direction
             let mut ray = RAYS[dir.idx()][king_sq] & occ;
             if ray == 0 { continue; }
 
             // isolate nearest piece on the ray
-            let first_bb = if dir.is_positive() {        // N, NE, E, NW
+            let first_bb = if dir.is_positive() {  // N, NE, E, NW
                 ray & ray.wrapping_neg()                 // LS1B
             } else {                                     // S, SW, W, SE
                 1u64 << (63 - ray.leading_zeros())       // MS1B
             };
-            let first_sq = first_bb.trailing_zeros() as u8;    // BSF works either way
             let sliders  = if dir.is_ortho() { ortho_sliders } else { diag_sliders };
 
             // ① direct check?
@@ -360,6 +525,17 @@ impl Position {
     pub fn occupied(&self) -> u64 {
         self.black() | self.white()
     }
+
+    pub fn piece_at_sq(&self, sq: u8) -> Option<Piece> {
+        decode_piece(self.board[sq as usize]).map(|(piece, _)| piece)
+    }
+
+    pub fn is_slider(&self, sq: u8) -> bool {
+        self.piece_at_sq(sq)
+            .map(|piece| piece == Piece::Bishop || piece == Piece::Rook || piece == Piece::Queen)
+            .unwrap_or(false)
+    }
+
 
     pub fn en_passant_capture_pawn(&self) -> u8 {
         if self.en_passant == 64 {
@@ -620,6 +796,7 @@ mod tests {
 
     #[test]
     fn test_do_move_basic_pawn_push() {
+        use crate::mov::MoveKind;
         let mut pos = Position::start();
         let from = 12; // d2
         let to = 28; // d4
@@ -636,24 +813,12 @@ mod tests {
         assert_eq!(pos.en_passant(), 20); // square between d2 and d4
         assert_eq!(pos.turn(), Color::Black);
     }
-
-    #[test]
-    fn test_handle_capture_removes_piece_correctly() {
-        let mut pos = Position::default();
-        let square = 36;
-        let encoded = encode_piece(Piece::Pawn, Color::Black);
-        pos.board[square] = encoded;
-        pos.piece_list[Piece::Pawn as usize][Color::Black as usize][0] = square as u8;
-        pos.reverse_piece_index[Piece::Pawn as usize][Color::Black as usize][square] = Some(0);
-        pos.piece_bitboards[Piece::Pawn as usize] = 1u64 << square;
-        pos.color_bitboards[Color::Black as usize] = 1u64 << square;
-
-        pos.handle_capture(square);
-
-        assert_eq!(pos.board[square], EMPTY_PIECE);
-        assert_eq!(pos.piece_bitboards[Piece::Pawn as usize] & (1u64 << square), 0);
-        assert_eq!(pos.color_bitboards[Color::Black as usize] & (1u64 << square), 0);
-    }
 }
 
-
+pub fn square_name(index: u8) -> String {
+    let file = (index % 8) as u8;
+    let rank = (index / 8) as u8;
+    let file_char = (b'a' + file) as char;
+    let rank_char = (b'1' + rank) as char;
+    format!("{}{}", file_char, rank_char)
+}

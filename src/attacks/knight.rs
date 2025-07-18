@@ -1,5 +1,5 @@
-use crate::attacks::tables::{KNIGHT_MOVES, PAWN_ATTACKS};
-use crate::bitboards::{pop_lsb, print_bitboard};
+use crate::attacks::tables::{KNIGHT_MOVES};
+use crate::bitboards::{pop_lsb};
 use crate::color::Color;
 use crate::mov::{Move, MoveFlags, MoveKind, MoveList};
 use crate::piece::Piece;
