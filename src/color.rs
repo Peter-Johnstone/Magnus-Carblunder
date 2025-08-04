@@ -16,21 +16,27 @@ impl Color {
             panic!("Unrecognized color {}", s);
         }
     }
-    pub fn is_white(self) -> bool {
+
+    pub fn to_str(self) -> String {
+        if self.is_white() {
+            "w".to_string()
+        } else {
+            "b".to_string()
+        }
+    }
+    pub const fn is_white(self) -> bool {
         matches!(self, Color::White)
     }
 
-    pub fn is_black(self) -> bool {
+    pub const fn is_black(self) -> bool {
         matches!(self, Color::Black)
     }
 
 }
 impl Not for Color {
     type Output = Color;
+
     fn not(self) -> Color {
-        match self {
-            Color::White => Color::Black,
-            Color::Black => Color::White
-        }
+        unsafe { std::mem::transmute(self as u8 ^ 1) }
     }
 }

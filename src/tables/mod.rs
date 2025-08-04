@@ -14,6 +14,7 @@ mod rays;
 mod between_exclusive;
 mod between_inclusive;
 mod line_bb;
+pub mod zobrist;
 
 pub use line_bb::LINE_BB;
 pub use between_inclusive::BETWEEN_INCLUSIVE;

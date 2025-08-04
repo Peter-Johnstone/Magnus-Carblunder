@@ -1,0 +1,5 @@
+[alias]
+flame = "flamegraph --release --test perft_suite -- --exact perft_test_temp"
+
+flamefull = "cargo flamegraph --release --test perft_suite -- run_perft_suite --exact"
+

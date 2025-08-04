@@ -1,36 +1,43 @@
-use std::str::SplitWhitespace;
-use crate::attacks::sliding::{diagonal_attacks, orthogonal_attacks};
-use crate::castling_rights::CastlingRights;
-use crate::color::Color;
-use crate::attacks::tables::{KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS, RAYS};
-use crate::mov::{Move};
-use crate::direction::Dir;
-use crate::piece::{decode_piece, encode_piece, EncodedPiece, Piece, EMPTY_PIECE};
-pub(crate) use crate::state_info::StateInfo;
+#![cfg_attr(not(debug_assertions), allow(unused_unsafe))]
 
+use std::str::SplitWhitespace;
+use crate::attacks::movegen::{all_moves};
+use crate::attacks::sliding::{diagonal_attacks, orthogonal_attacks};
+use crate::castling_rights::{CastlingRights, CASTLE_RIGHT_MASK, ROOK_END_FROM_KING_TO, ROOK_START_FROM_KING_TO};
+use crate::color::Color;
+use crate::tables::{zobrist, KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS, RAYS};
+use crate::mov::{en_passant_capture_pawn, flag, index_to_algebraic, is_flag_capture_promo, is_flag_quiet_promo, new_en_passant_square, Move};
+use crate::direction::Dir;
+use crate::eval::{build_eval, mirror, EvalCache, PHASE_INC, PIECE_VALUE, PST_EG, PST_MG};
+use crate::piece::{is_empty, is_slider_val, piece_to_val, to_color, to_piece, to_str, ColoredPiece, Piece, EMPTY_PIECE};
+pub(crate) use crate::state_info::StateInfo;
+use crate::undo::{Undo, UndoStack};
+
+pub const NO_CAPTURE: ColoredPiece = EMPTY_PIECE; // 0
+pub const NO_SQ     : u8           = 64;
 const MAX_PIECES: usize = 10;
 
-#[derive(Copy, Clone, Debug)]
-pub struct Undo {
-    captured_piece: Option<(EncodedPiece, u8)>, // piece, square, idx
-    castling_rights: CastlingRights,
-    en_passant: u8, // or Option<u8> if you refactor it
-    half_move: u8,
-    mov: Move,
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Status {
+    Checkmate(Color),   // winner (the *other* side to move)
+    Draw,
+    Ongoing,
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Position {
-    board: [EncodedPiece; 64],
+    board: [ColoredPiece; 64],
     piece_list: [[[u8; MAX_PIECES]; 2]; 6],  // [piece][color][index]
     piece_count: [[usize; 2]; 6],
-    reverse_piece_index: [[[Option<usize>; 64]; 2]; 6], // [piece][color][square]
-    piece_bitboards: [u64; 6], // [p, n, b, r, q]
-    color_bitboards: [u64; 2], // [w, b]
-    undo_stack: Vec<Undo>,
+    reverse_piece_index: [[[u8; 64]; 2]; 6], // [piece][color][square]
+    bitboards: [[u64; 6]; 2],
+    occupancy: [u64; 2],
+    pub(crate) undo_stack: UndoStack,
+    zobrist: u64,
+    eval: EvalCache,
     turn: Color,
     castling_rights: CastlingRights,
+    state_info: StateInfo,
     en_passant: u8,
     half_move: u8,
 }
@@ -40,12 +47,15 @@ impl Default for Position {
             board: [0; 64],
             piece_list: [[[64; MAX_PIECES]; 2]; 6],
             piece_count: Default::default(),
-            reverse_piece_index: [[[None; 64]; 2]; 6],
-            piece_bitboards: Default::default(),
-            color_bitboards: Default::default(),
-            undo_stack: Vec::new(),
+            reverse_piece_index: [[[255; 64]; 2]; 6],
+            bitboards: [[0u64; 6]; 2],
+            occupancy: [0u64; 2],
+            undo_stack: UndoStack::new(),
+            zobrist: 0,
+            eval: EvalCache::default(),
             turn: Default::default(),
             castling_rights: Default::default(),
+            state_info: Default::default(),
             en_passant: 0,
             half_move: 0,
         }
@@ -77,10 +87,10 @@ impl Position {
 
             let col = file as u8 - b'a';
             let row = rank.to_digit(10).unwrap() as u8 - 1; // subtract 1 to make it 0-based
-
+            position.zobrist ^= zobrist::EN_PASSANT[col as usize];
             row * 8 + col
         } else {
-            64
+            NO_SQ
         };
 
 
@@ -88,9 +98,22 @@ impl Position {
         position.half_move = half_move_str
             .map(|s| s.parse::<u8>().expect("Invalid half move count"))
             .unwrap_or(0);
+        position.half_move = 0;
+
+        if position.turn == Color::Black {
+            position.zobrist ^= zobrist::TURN_IS_BLACK;
+        }
+        position.zobrist ^= position.castling_rights.castling_zobrist();
+
+
+        position.eval = build_eval(&position);
+
+        position.state_info  = position.compute_pins_checks(position.turn);
 
         position
+
     }
+
 
     fn load_board_from_fen(&mut self, fen_board : &str) {
         for (row_index, row) in fen_board.split('/').enumerate() {
@@ -108,294 +131,540 @@ impl Position {
         }
     }
 
-    /// Cheap in release, exhaustive in debug.
-    pub fn assert_consistent(&self, mov: Move, undo:bool, start: bool) {
-        let consistent = self.is_consistent();
+    pub fn to_fen(&self) -> String {
+        let mut s = "".to_owned();
+        let mut row = "".to_owned();
+        let mut consec_empties: u8 = 0;
+        for (i, cp_ref) in self.board.iter().rev().enumerate()
 
-        if !consistent {
-            println!("Undo? {undo}, start? {start}");
-            self.print_move_history();
-            println!("Move: {}", mov);
-            self.print_board();
+        // board
+        {
+            let cp = *cp_ref;
 
-        }
-        debug_assert!(consistent,
-                      "Position corruption detected; see stderr for details");
-    }
-
-    /// Thorough but slow: call only under `debug_assert!`.
-    pub fn is_consistent(&self) -> bool {
-        // 1.  Board ↔ bitboards
-        for sq in 0..64 {
-            let encoded = self.board[sq];
-            let on_board = encoded != EMPTY_PIECE;
-            let in_bb    =
-                (self.color_bitboards[0] | self.color_bitboards[1]) & (1u64 << sq) != 0;
-            if on_board != in_bb { eprintln!("square {} board/bitboard mismatch", square_name(sq as u8));return false }
-        }
-
-        // 2.  Board ↔ reverse_piece_index / piece_list
-        for p in 0..6 {
-            for c in 0..2 {
-                for idx in 0..self.piece_count[p][c] {
-                    let sq = self.piece_list[p][c][idx] as usize;
-                    if self.reverse_piece_index[p][c][sq] != Some(idx) {
-                        eprintln!("NUMBER OF PAWNS: {} ", self.piece_count[p][c]);
-
-                        eprintln!("Reverse piece index: {:?}", self.reverse_piece_index[p][c][sq]);
-                        eprintln!("square {sq} board/bitboard mismatch");
-                        eprintln!("piece list and reverse index disagree for {p:?}/{c} idx {idx}");
-                        return false
-                    }
-                    if self.board[sq] == EMPTY_PIECE {
-                        eprintln!("piece list says a piece is on empty square {sq}");
-                        return false
-                    }
+            if is_empty(cp) {
+                consec_empties += 1;
+            }
+            else {
+                if consec_empties != 0 {
+                    row += &*consec_empties.to_string();
+                    consec_empties = 0;
                 }
+                row += to_str(cp);
+            }
+
+            if (i+1) % 8 == 0 {
+                // add the reversed
+                if consec_empties != 0 {
+                    row += &*consec_empties.to_string();
+                    consec_empties = 0;
+                }
+                s += &*(row.chars().rev().collect::<String>());
+                if i != 63 {
+                    s += "/";
+                }
+                row = "".to_owned();
             }
         }
 
-        // 3.  Side to move sanity, castling rights squares contain correct rook/king, etc.
-        //      (Fill in the details that matter for your engine.)
-        true
+        // turn
+        s += " ";
+        s += &*self.turn.to_str();
+
+        // castling
+        s += " ";
+        s += &*self.castling_rights.to_str();
+
+        // en passant
+        s += " ";
+        if self.en_passant != NO_SQ {
+            s += &*index_to_algebraic(self.en_passant);
+        } else {
+            s += "-";
+        }
+
+        // half move
+        s += " ";
+        s += &*self.half_move.to_string();
+        s
+    }
+
+    pub fn do_null_move(&mut self) {
+        self.zobrist ^= zobrist::TURN_IS_BLACK;
+        self.turn = !self.turn;
+        self.state_info = self.compute_pins_checks(self.turn);
+    }
+
+    pub fn undo_null_move(&mut self) {
+        self.zobrist ^= zobrist::TURN_IS_BLACK;
+        self.turn = !self.turn;
+        self.state_info = self.compute_pins_checks(self.turn);
     }
 
     pub fn do_move(&mut self, mov: Move) {
+        debug_assert!(!mov.is_null());
         let (from, to) = (mov.from() as usize, mov.to() as usize);
-        let encoded = self.board[from];
 
-        let (piece, color) = decode_piece(encoded).expect("Tried to move from an empty square");
+        let colored = self.board[from];
+        let piece   = to_piece(colored);
+        let color   = to_color(colored);
+        let flag    = mov.flag();
 
-        // Save undo info
-        let mut captured_piece = None;
-        if mov.is_capture() || mov.is_en_passant() {
-            let capture_square = if mov.is_capture() {
-                to
+        /* ─── NEW: incremental‑eval deltas initialisation ─────────── */
+        let mut d_mg    = 0i32;
+        let mut d_eg    = 0i32;
+        let mut d_phase = 0i32;
+        let sgn    = if color.is_white() { 1 } else { -1 };
+        let from_i = if color.is_white() { from } else { mirror(from) };
+        let to_i   = if color.is_white() { to   } else { mirror(to)   };
+        let p_idx  = piece as usize;
+
+        // Moving piece leaves its square: remove its contribution from eval & phase
+        d_mg    -= sgn * (PST_MG[p_idx][from_i] + PIECE_VALUE[p_idx]) as i32;
+        d_eg    -= sgn * (PST_EG[p_idx][from_i] + PIECE_VALUE[p_idx]) as i32;
+        d_phase -= PHASE_INC[p_idx];
+        /* ─────────────────────────────────────────────────────────── */
+
+        /* 2. capture info before mutating board --------------------- */
+        let mut captured_piece  = EMPTY_PIECE;
+        let mut captured_square = NO_SQ;
+
+        if flag == flag::CAPTURE || flag == flag::EN_PASSANT || is_flag_capture_promo(flag) {
+            captured_square = if flag == flag::EN_PASSANT {
+                en_passant_capture_pawn(to) as u8
             } else {
-                self.en_passant_capture_pawn() as usize
+                to as u8
             };
-            let captured_encoded = self.board[capture_square];
+            unsafe {
+                captured_piece = *self.board.get_unchecked(captured_square as usize);
 
-            captured_piece = Some((captured_encoded, capture_square as u8));
-            self.remove_piece(capture_square);
+                let cp              = to_piece(captured_piece) as usize;
+                let captured_color  = to_color(captured_piece);
+                let csgn            = if captured_color.is_white() { 1 } else { -1 };
+                let cap_sq          = captured_square as usize;
+                let cap_i           = if captured_color.is_white() { cap_sq } else { mirror(cap_sq) };
+
+                // Removing a piece means subtracting its contribution from the eval & phase
+                d_mg    -= csgn * (PST_MG[cp][cap_i] + PIECE_VALUE[cp]) as i32;
+                d_eg    -= csgn * (PST_EG[cp][cap_i] + PIECE_VALUE[cp]) as i32;
+                d_phase -= PHASE_INC[cp];
+            }
         }
 
+        /* 3. push undo **before** making changes -------------------- */
         self.undo_stack.push(Undo {
             captured_piece,
-            castling_rights: self.castling_rights,
-            en_passant: self.en_passant,
-            half_move: self.half_move,
+            captured_square,
+            castling:    self.castling_rights,
+            en_passant:  self.en_passant,
+            half_move:   self.half_move,
+            zobrist:     self.zobrist,
+            delta_mg:    0,           // filled later
+            delta_eg:    0,
+            delta_phase: 0,
+            state_info: self.state_info,
             mov,
         });
 
-        if piece == Piece::King {
-            self.castling_rights.remove_castling_rights(self.turn)
+        /* ---- hash out old en-passant ------------------------------ */
+        if self.en_passant != NO_SQ {
+            self.zobrist ^= zobrist::EN_PASSANT[(self.en_passant % 8) as usize];
         }
-        self.handle_rook_castling_change(from, to);
+        self.en_passant = NO_SQ;               // cleared (maybe re-set)
 
+        /* ---- hash out moving piece on FROM ------------------------ */
+        self.zobrist ^= zobrist::PIECE_SQUARES[from][p_idx][color as usize];
+        self.zobrist ^= zobrist::PIECE_SQUARES[to  ][p_idx][color as usize];
 
-        if mov.is_castling() {
-            self.handle_castle(from, to)
+        /* 5. main move ladder (unchanged logic) --------------------- */
+        if flag == flag::QUIET {
+            self.move_piece(piece, color, from, to);
+
+        } else if flag == flag::DOUBLE_PAWN_PUSH {
+            self.move_piece(piece, color, from, to);
+            self.en_passant = new_en_passant_square(from);
+            self.zobrist ^= zobrist::EN_PASSANT[(self.en_passant % 8) as usize];
+
+        } else if flag == flag::CAPTURE {
+            self.capture_and_move_piece(piece, color, from, to);
+
+        } else if flag == flag::QUEEN_CASTLE || flag == flag::KING_CASTLE {
+            let r_from = ROOK_START_FROM_KING_TO[to];
+            let r_to   = ROOK_END_FROM_KING_TO[to];
+
+            self.zobrist ^= zobrist::PIECE_SQUARES[r_from][Piece::Rook as usize][color as usize];
+            self.zobrist ^= zobrist::PIECE_SQUARES[r_to  ][Piece::Rook as usize][color as usize];
+
+            self.move_piece(piece,        color, from,   to);
+            self.move_piece(Piece::Rook,  color, r_from, r_to);
+
+            let r_from_i = if color.is_white() { r_from } else { mirror(r_from) };
+            let r_to_i   = if color.is_white() { r_to   } else { mirror(r_to)   };
+            let rp = Piece::Rook as usize;
+
+            d_mg -= sgn * PST_MG[rp][r_from_i] as i32;
+            d_eg -= sgn * PST_EG[rp][r_from_i] as i32;
+            d_mg += sgn * PST_MG[rp][r_to_i]   as i32;
+            d_eg += sgn * PST_EG[rp][r_to_i]   as i32;
+
+        } else if is_flag_quiet_promo(flag) {
+            self.move_piece(piece, color, from, to);
+            self.promote_to(mov.promotion_piece(), to, color);
+
+            let np = mov.promotion_piece() as usize;
+            d_mg += sgn * (PST_MG[np][to_i] + PIECE_VALUE[np] - PIECE_VALUE[Piece::Pawn as usize]) as i32;
+            d_eg += sgn * (PST_EG[np][to_i] + PIECE_VALUE[np] - PIECE_VALUE[Piece::Pawn as usize]) as i32;
+            d_phase += PHASE_INC[np];
+
+        } else if is_flag_capture_promo(flag) {
+            self.capture_and_move_piece(piece, color, from, to);
+            self.promote_to(mov.promotion_piece(), to, color);
+
+            let np = mov.promotion_piece() as usize;
+            d_mg += sgn * (PST_MG[np][to_i] + PIECE_VALUE[np] - PIECE_VALUE[Piece::Pawn as usize]) as i32;
+            d_eg += sgn * (PST_EG[np][to_i] + PIECE_VALUE[np] - PIECE_VALUE[Piece::Pawn as usize]) as i32;
+            d_phase += PHASE_INC[np];
+
+        } else if flag == flag::EN_PASSANT {
+            self.remove_piece(captured_square as usize);
+            self.move_piece(piece, color, from, to);
+
+        } else {
+            unreachable!();
         }
 
-        // Move the piece
-        self.move_piece(piece, color, from, to);
+        /* 6. add moving piece on TO --------------------------------- */
+        d_mg += sgn * (PST_MG[p_idx][to_i] + PIECE_VALUE[p_idx]) as i32;
+        d_eg += sgn * (PST_EG[p_idx][to_i] + PIECE_VALUE[p_idx]) as i32;
+        d_phase += PHASE_INC[p_idx];
 
-        self.handle_promotion(mov, to, color);
+        /* 7. update eval cache -------------------------------------- */
+        self.eval.mg    += d_mg;
+        self.eval.eg    += d_eg;
+        self.eval.phase += d_phase;
 
-        // Update en passant square (or clear)
-        self.en_passant = mov.new_en_passant_square();
+        /* 8. update last pushed Undo with the deltas ---------------- */
+        {
+            let u = self.undo_stack.last_mut();
+            u.delta_mg    = d_mg;
+            u.delta_eg    = d_eg;
+            u.delta_phase = d_phase;
+        }
 
-        // Rule-50 clock reset on pawn move or capture
-        self.update_rule50(piece, mov.is_capture());
+        /* 9. hash castling rights ----------------------------------- */
+        let old_rights = self.castling_rights.0;
+        self.castling_rights.0 &= CASTLE_RIGHT_MASK[from] & CASTLE_RIGHT_MASK[to];
+        let lost = old_rights ^ self.castling_rights.0;
+        if lost & 0b0001 != 0 { self.zobrist ^= zobrist::CASTLING[0]; }
+        if lost & 0b0010 != 0 { self.zobrist ^= zobrist::CASTLING[1]; }
+        if lost & 0b0100 != 0 { self.zobrist ^= zobrist::CASTLING[2]; }
+        if lost & 0b1000 != 0 { self.zobrist ^= zobrist::CASTLING[3]; }
 
-        // Switch sides
+
+        /* 10. half-move clock ---------------------------------------- */
+        self.half_move = if piece == Piece::Pawn || captured_piece != EMPTY_PIECE {
+            0
+        } else {
+            self.half_move + 1
+        };
+
+
+
+        /* 11. flip turn & hash ---------------------------------------- */
+        self.zobrist ^= zobrist::TURN_IS_BLACK;
         self.turn = !self.turn;
-    }
+        self.state_info = self.compute_pins_checks(self.turn);
 
-    fn handle_promotion(&mut self, mov: Move, to: usize, color: Color) {
-        if mov.is_promotion() {
-            let new_piece = mov.promotion_piece().unwrap();
-            // remove the pawn
-            self.remove_piece(to);
-
-            // add the new promotion piece to the board
-            let encoded_piece = encode_piece(new_piece, color);
-            self.add_piece(encoded_piece, to as u8);
-        }
-    }
-
-    pub fn print_move_history(&self) {
-        println!("Move History: ");
-        for i in 0..self.undo_stack.len() {
-            println!("{:}", self.undo_stack[i].mov);
-        }
     }
 
 
+
+
+    #[inline(always)]
     pub fn undo_move(&mut self) {
-        if self.undo_stack.len() == 0 {
-            // no moves to undo
-            return
-        }
+        debug_assert!(!self.undo_stack.is_empty());
 
-        let undo = self.undo_stack.pop().unwrap();
-        let mov = undo.mov;
-        let (to, from) = (mov.from() as usize, mov.to() as usize); // reversed because undo
-        let encoded = self.board[from];
+        /* 1. pop record ------------------------------------------------ */
+        let undo = self.undo_stack.pop();
 
-        let (piece, color) = decode_piece(encoded).expect("Tried to move from an empty square");
+        /* 2. reverse the board move ----------------------------------- */
+        let (to, from) = (undo.mov.from() as usize, undo.mov.to() as usize); // reversed
+        let coloured   = unsafe { *self.board.get_unchecked(from) };
+        let piece      = to_piece(coloured);
+        let color      = to_color(coloured);
 
-        // Move the piece
         self.move_piece(piece, color, from, to);
 
-
-
-
-        self.handle_unpromote(mov, to, color);
-        self.undo_rook_castle_movement(mov, from);
-        self.castling_rights = undo.castling_rights;
-        self.en_passant = undo.en_passant;
-
-
-        // Rule-50 clock reset on pawn move or capture
-        self.half_move = undo.half_move;
-
-        // undo_move, restoring a capture – simple, safe version
-        if let Some((captured, sq)) = undo.captured_piece {
-            self.add_piece(captured, sq);
+        match undo.mov.flag() {
+            flag::QUIET => {}
+            flag::CAPTURE | flag::EN_PASSANT => {
+                self.add_piece(undo.captured_piece as ColoredPiece, undo.captured_square);
+            }
+            flag if is_flag_quiet_promo(flag) => {
+                self.replace_piece(Piece::Pawn, color, to);
+            }
+            flag if is_flag_capture_promo(flag) => {
+                self.add_piece(undo.captured_piece as ColoredPiece, undo.captured_square);
+                self.replace_piece(Piece::Pawn, color, to);
+            }
+            flag::KING_CASTLE | flag::QUEEN_CASTLE => {
+                self.move_piece(
+                    Piece::Rook,
+                    color,
+                    ROOK_END_FROM_KING_TO[from],
+                    ROOK_START_FROM_KING_TO[from],
+                );
+            }
+            _ => {}
         }
-        // Switch sides
+
+        /* 3. restore hash, rights, counters --------------------------- */
+        self.zobrist         = undo.zobrist;
+        self.castling_rights = undo.castling;
+        self.en_passant      = undo.en_passant;
+        self.half_move       = undo.half_move;
+        self.state_info      = undo.state_info;
+
+
+        /* 4. restore incremental evaluation --------------------------- */
+        self.eval.mg    -= undo.delta_mg;
+        self.eval.eg    -= undo.delta_eg;
+        self.eval.phase -= undo.delta_phase;
+
+
+        /* 5. flip side-to-move ---------------------------------------- */
         self.turn = !self.turn;
+
     }
 
-    fn handle_unpromote(&mut self, mov: Move, to: usize, color: Color) {
-        if mov.is_promotion() {
-            // remove the pawn
-            self.remove_piece(to);
 
-            // add the new promotion piece to the board
-            let encoded_piece = encode_piece(Piece::Pawn, color);
-            self.add_piece(encoded_piece, to as u8);
+    #[inline(always)]
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+    #[inline(always)]
+    pub fn capture_and_move_piece(&mut self, piece: Piece, color: Color, from: usize, to: usize) {
+        /* --- remove captured piece ----------------------------------- */
+        let cap_p = to_piece(self.board[to]) as usize;
+        let cap_c = to_color(self.board[to]) as usize;
+
+        self.zobrist ^= zobrist::PIECE_SQUARES[to][cap_p][cap_c];
+
+
+        let idx        = self.rev_idx(cap_p, cap_c, to) as usize;
+        let last_idx   = self.piece_count[cap_p][cap_c] - 1;
+        let last_sq    = self.piece_list[cap_p][cap_c][last_idx] as usize;
+
+        // swap‑remove without branch
+        unsafe {
+            *self.piece_list[cap_p][cap_c].get_unchecked_mut(idx)      = last_sq as u8;
+            *self.reverse_piece_index[cap_p][cap_c].get_unchecked_mut(last_sq) = idx as u8;
         }
-    }
+        self.piece_count[cap_p][cap_c] -= 1;
 
-    fn add_piece(&mut self, captured: EncodedPiece, sq: u8) {
-        let (pc, col) = decode_piece(captured).unwrap();
-        let p = pc as usize;
-        let c = col as usize;
+        let bb_to = 1u64 << to;
+        self.bitboards[cap_c][cap_p] ^= bb_to;
+        self.occupancy[cap_c]        ^= bb_to;
 
-        let idx = self.piece_count[p][c];          // first free slot
-        self.piece_list[p][c][idx] = sq;           // append
-        self.reverse_piece_index[p][c][sq as usize] = Some(idx);
-        self.piece_count[p][c] += 1;               // list grows by 1
+        /* --- move attacking piece ------------------------------------ */
+        let p = piece as usize;
+        let c = color as usize;
 
-        self.board[sq as usize] = captured;
-        let bb = 1u64 << sq;
-        self.piece_bitboards[p] |= bb;
-        self.color_bitboards[c] |= bb;
-    }
-
-    fn undo_rook_castle_movement(&mut self, mov: Move, from: usize) {
-        // move rook back
-        if mov.is_castling() {
-            let is_queenside = self.board[from + 1] != EMPTY_PIECE;
-            let (rook_from, rook_to) = if is_queenside {
-                (from + 1, from - 2)
-            } else {
-                (from - 1, from + 1)
-            };
-            let (piece, color) = decode_piece(self.board[rook_from]).unwrap();
-            self.move_piece(piece, color, rook_from, rook_to);
+        unsafe {
+            *self.board.get_unchecked_mut(from) = EMPTY_PIECE;
+            *self.board.get_unchecked_mut(to)   = piece_to_val(piece, color);
         }
+
+        let idx_from = self.rev_idx(p, c, from) as usize;
+        unsafe {
+            *self.reverse_piece_index[p][c].get_unchecked_mut(to)   = idx_from as u8;
+            *self.piece_list[p][c].get_unchecked_mut(idx_from)      = to as u8;
+        }
+
+        let delta = (1u64 << from) ^ bb_to;
+        self.bitboards[c][p] ^= delta;
+        self.occupancy[c]    ^= delta;
+
     }
 
-    fn handle_rook_castling_change(&mut self, from: usize, to: usize) {
-        if to == 0 || to == 7 || to == 56 || to == 63 {
-            self.castling_rights.remove_castling_right(to);
-        }
-        if from == 0 || from == 7 || from == 56 || from == 63 {
-            self.castling_rights.remove_castling_right(from);
-        }
+    #[inline(always)]
+    fn promote_to(&mut self, new_piece: Piece, to: usize, color: Color) {
+        // remove the pawn
+        self.remove_piece(to);
+        // add the new promotion piece to the board
+        let colored_piece = piece_to_val(new_piece, color);
+        self.add_piece(colored_piece, to as u8);
+        self.zobrist ^= zobrist::PIECE_SQUARES[to][new_piece as usize][color as usize];
+
     }
 
+
+    #[inline(always)]
     fn move_piece(&mut self, piece: Piece, color: Color, from: usize, to: usize) {
         let p = piece as usize;
         let c = color as usize;
 
+
         // 1. Update board squares
-        self.board[from] = EMPTY_PIECE;
-        self.board[to] = encode_piece(piece, color);
+        unsafe {
+            *self.board.get_unchecked_mut(from) = EMPTY_PIECE;
+            *self.board.get_unchecked_mut(to)   = piece_to_val(piece, color);
+        }
+
 
         // 2. Update reverse index
-        let count = self.reverse_piece_index[p][c][from]
-            .expect("Piece missing from reverse piece index!");
-        self.reverse_piece_index[p][c][from] = None;
-        self.reverse_piece_index[p][c][to] = Some(count);
+        let count = self.rev_idx(p, c, from) as usize;
+        self.set_rev_idx(p, c, to, count as u8);
+
+
+        debug_assert!(
+            count != 255,
+            "Invalid reverse index for {:?} {:?} at square {}",
+            piece, color, from
+        );
 
         // 3. Update piece list
         self.piece_list[p][c][count] = to as u8;
 
-        // 4. Update bitboards
-        let from_bb = 1u64 << from;
-        let to_bb = 1u64 << to;
+        let delta = (1u64 << from) ^ (1u64 << to);
+        self.bitboards[color as usize][piece as usize] ^= delta;
+        self.occupancy[color as usize]                 ^= delta;
 
-        self.piece_bitboards[p] = (self.piece_bitboards[p] & !from_bb) | to_bb;
-        self.color_bitboards[c] = (self.color_bitboards[c] & !from_bb) | to_bb;
     }
 
+    #[inline(always)]
+    fn replace_piece(&mut self, new_piece: Piece, new_color: Color, sq: usize) {
+        /* -------- 1. remove the piece currently on `sq` ----------------- */
+        let old_p = to_piece(self.board[sq])  as usize;
+        let old_c = to_color(self.board[sq])  as usize;
+
+        self.zobrist ^= zobrist::PIECE_SQUARES[sq][old_p][old_c];
+
+
+        let idx       = self.rev_idx(old_p, old_c, sq) as usize;
+        let last_idx  = self.piece_count[old_p][old_c] - 1;
+        let last_sq   = self.piece_list[old_p][old_c][last_idx] as usize;
+
+        // unconditional swap‑remove (branch‑free)
+        unsafe {
+            *self.piece_list[old_p][old_c].get_unchecked_mut(idx) = last_sq as u8;
+            *self.reverse_piece_index[old_p][old_c].get_unchecked_mut(last_sq) = idx as u8;
+        }
+        self.piece_count[old_p][old_c] -= 1;
+
+        // clear board & bitboards
+        let bb_sq = 1u64 << sq;
+        self.board[sq]                    = EMPTY_PIECE;
+        self.bitboards[old_c][old_p]     ^= bb_sq;
+        self.occupancy[old_c]            ^= bb_sq;
+
+        /* -------- 2. add the new piece on the same square --------------- */
+        let new_p = new_piece as usize;
+        let new_c = new_color as usize;
+
+        let idx_new = self.piece_count[new_p][new_c];
+        self.piece_list[new_p][new_c][idx_new]           = sq as u8;
+        self.reverse_piece_index[new_p][new_c][sq]       = idx_new as u8;
+        self.piece_count[new_p][new_c]                  += 1;
+
+        self.zobrist ^= zobrist::PIECE_SQUARES[sq][new_p][new_p];
+
+        self.board[sq] = piece_to_val(new_piece, new_color);
+        self.bitboards[new_c][new_p] ^= bb_sq;   // set bit
+        self.occupancy[new_c]        ^= bb_sq;
+    }
+
+
+    #[inline(always)]
+    fn add_piece(&mut self, new_piece: ColoredPiece, sq: u8) {
+        let p = to_piece(new_piece) as usize;
+        let c = to_color(new_piece) as usize;
+
+        let idx = self.piece_count[p][c];          // first free slot
+        self.piece_list[p][c][idx] = sq;           // append
+        self.reverse_piece_index[p][c][sq as usize] = idx as u8;
+        self.piece_count[p][c] += 1;               // list grows by 1
+
+        self.board[sq as usize] = new_piece;
+        let bb = 1u64 << sq;
+        self.bitboards[c][p] |= bb;
+        self.occupancy[c] |= bb;
+    }
+
+    #[inline(always)]
     fn remove_piece(&mut self, sq: usize) {
-        let (piece, col) = decode_piece(self.board[sq]).unwrap();
-        let p = piece as usize;
-        let c = col as usize;
+        let p = to_piece(self.board[sq]) as usize;
+        let c = to_color(self.board[sq]) as usize;
+
+        self.zobrist ^= zobrist::PIECE_SQUARES[sq][p][c];
+
 
         // index of the captured piece in the list
-        let idx       = self.reverse_piece_index[p][c][sq].unwrap();
+        let idx = self.rev_idx(p, c, sq) as usize;
         let last_idx  = self.piece_count[p][c] - 1;
         let last_sq   = self.piece_list[p][c][last_idx] as usize;
-
         // move the *last* piece into `idx`
         if idx != last_idx {
             self.piece_list[p][c][idx]            = last_sq as u8;
-            self.reverse_piece_index[p][c][last_sq] = Some(idx);
+            self.reverse_piece_index[p][c][last_sq] = idx as u8;
         }
-
-        // ✱✱ blank out the list slot that is now unused ✱✱
-        self.piece_list[p][c][last_idx] = 64;
 
         self.piece_count[p][c] -= 1;
-        self.reverse_piece_index[p][c][sq] = None;
 
         // board & bitboards …
-        self.board[sq] = EMPTY_PIECE;
-        let bb = 1u64 << sq;
-        self.piece_bitboards[p] &= !bb;
-        self.color_bitboards[c] &= !bb;
-    }
-
-
-    fn handle_castle(&mut self, from: usize, to: usize) {
-        let rook_to = (from + to) / 2;
-        let rook_from =  if to == 2 || to == 58 {to - 2} else {to + 1}; // if queenside rook came from left, else came from right
-        self.move_piece(Piece::Rook, self.turn, rook_from, rook_to);
-    }
-
-    fn update_rule50(&mut self, piece: Piece, is_capture: bool) {
-        if piece == Piece::Pawn || is_capture {
-            self.half_move = 0;
-        } else {
-            self.half_move += 1;
+        unsafe {
+            *self.board.get_unchecked_mut(sq) = EMPTY_PIECE;
         }
+        let bb = 1u64 << sq;
+        self.bitboards[c][p] &= !bb;
+        self.occupancy[c]    &= !bb;
     }
+
+
+    #[inline(always)]
+    pub fn evaluate(&self) -> i16 {
+        self.eval.tapered()
+    }
+
+    #[inline(always)]
+    pub fn en_passant_capture_square(&self) -> usize{
+        en_passant_capture_pawn(self.en_passant as usize)
+    }
+
+
+    /// Return `true` if the current side‑to‑move position
+    /// has occurred at least **once** earlier in the 50‑move window.
+    #[inline(always)]
+    pub fn is_repeat_towards_three_fold_repetition(&self) -> bool {
+        // Current Zobrist key
+        let key = self.zobrist;
+
+        if self.half_move < 4 { return false; }
+
+        // Step back two plies at a time (same side to move)
+        let mut remaining = self.half_move as i32 - 2;           // reversible plies left
+        let mut idx       = self.undo_stack.len as i32 - 2;      // last same‑side position
+
+        while remaining >= 0 && idx >= 0 {
+            if self.undo_stack.peek_index(idx as usize).zobrist == key {
+                return true;                                     // first earlier hit
+            }
+            idx       -= 2;
+            remaining -= 2;
+        }
+        false
+    }
+
+
 
     pub fn compute_pins_checks(&self, us: Color) -> StateInfo {
         let king_sq = self.king_square(us) as usize;
         let occ     = self.occupied();
 
+        let them = !us;
         // enemy sliders
-        let rooks   = self.rooks()   & self.occupancy(!us);
-        let bishops = self.bishops() & self.occupancy(!us);
-        let queens  = self.queens()  & self.occupancy(!us);
+        let rooks   = self.rooks(them);
+        let bishops = self.bishops(them);
+        let queens  = self.queens(them);
         let ortho_sliders = rooks | queens;
         let diag_sliders  = bishops | queens;
 
@@ -404,7 +673,6 @@ impl Position {
         let mut pinners           = 0u64;
 
         for dir in Dir::ALL {
-
 
             // pieces (friend+foe) in that direction
             let mut ray = RAYS[dir.idx()][king_sq] & occ;
@@ -442,8 +710,8 @@ impl Position {
         }
 
         // ③ pawn and knight checks
-        let enemy_pawns   = self.pawns()   & self.occupancy(!us);
-        let enemy_knights = self.knights() & self.occupancy(!us);
+        let enemy_pawns   = self.pawns(them);
+        let enemy_knights = self.knights(them);
 
         checkers |= PAWN_ATTACKS[us as usize][king_sq] & enemy_pawns;
         checkers |= KNIGHT_MOVES[king_sq]              & enemy_knights;
@@ -452,156 +720,241 @@ impl Position {
     }
 
 
+    /// Returns `Some(result)` when the position is terminal,
+    /// otherwise `None` so the search can continue.
+    pub fn check_game_over(&self) -> Status {
+
+        if self.half_move >= 100 {
+            return Status::Draw;
+        }
+        // 1.  Generate every legal move for the side to move.
+        if all_moves(self).is_empty() {
+            // 2.  No moves → either mate or stalemate.
+            //
+            // `all_attacks(self)` should return a bitboard (or Vec) of every
+            // square attacked by the *opponent*.  Replace the helper call with
+            // your own `is_in_check()` if you already have one.
+            self.get_game_result()
+        } else {
+            // Game still in progress
+            Status::Ongoing
+        }
+    }
+
+    pub fn get_game_result(&self) -> Status {
+        if self.in_check() {
+            // Side to move is mated; the *opposite* color wins.
+            let winner = !self.turn();
+            Status::Checkmate(winner)
+        } else {
+            Status::Draw
+        }
+    }
 
     pub fn square_under_attack(&self, sq: u8, by: Color) -> bool {
-        let enemies = self.occupancy(by);
-
-        let pawns = self.pawns() & enemies;
+        let pawns = self.pawns(by);
 
         // !by because our attacks (!by) is the fields of where enemy pawns can attack us
         if PAWN_ATTACKS[!by as usize][sq as usize] & pawns != 0 {
             return true;
         }
-        let king = self.kings() & enemies;
+        let king = self.kings(by);
         if KING_MOVES[sq as usize] & king != 0 {
             return true;
         }
 
-        let knights = self.knights() & enemies;
+        let knights = self.knights(by);
         if KNIGHT_MOVES[sq as usize] & knights != 0 {
             return true;
         }
 
-        let bishops = self.bishops() & enemies;
-        let queens = self.queens() & enemies;
+        let bishops = self.bishops(by);
+        let queens = self.queens(by);
         let occ = self.occupied();
 
         if diagonal_attacks(sq as usize, occ) & (bishops | queens) != 0 {
             return true;
         }
-        let rooks = self.rooks() & enemies;
+        let rooks = self.rooks(by);
         if orthogonal_attacks(sq as usize, occ) & (rooks | queens) != 0 {
             return true;
         }
         false
     }
 
+    #[inline(always)]
+    fn rev_idx(&self, piece: usize, color: usize, sq: usize) -> u8 {
+        self.reverse_piece_index[piece][color][sq]
+    }
+
+    #[inline(always)]
+    fn set_rev_idx(&mut self, piece: usize, color: usize, sq: usize, idx: u8) {
+        self.reverse_piece_index[piece][color][sq] = idx;
+    }
+
+    #[inline(always)]
+    pub fn piece_count(&self, piece: Piece, color: Color) -> i32 {
+        self.piece_count[piece as usize][color as usize] as i32
+    }
+
+    #[inline(always)]
+    pub fn in_check(&self) -> bool {
+        self.state_info.checkers != 0
+    }
+
+    #[inline(always)]
     pub fn turn(&self) -> Color {
         self.turn
     }
 
+    #[inline(always)]
     pub fn occupancy(&self, color: Color) -> u64 {
-        match color {
-            Color::White => self.white(),
-            Color::Black => self.black()
-        }
+        self.occupancy[color as usize]
     }
 
-    pub fn pawns(&self) -> u64 {
-        self.piece_bitboards[Piece::Pawn as usize]
+    #[inline(always)]
+    pub fn pawns(&self, color: Color) -> u64 {
+        self.bitboards[color as usize][Piece::Pawn as usize]
     }
-    pub fn knights(&self) -> u64 {
-        self.piece_bitboards[Piece::Knight as usize]
+    #[inline(always)]
+    pub fn knights(&self, color: Color) -> u64 {
+        self.bitboards[color as usize][Piece::Knight as usize]
     }
-    pub fn bishops(&self) -> u64 {
-        self.piece_bitboards[Piece::Bishop as usize]
+    #[inline(always)]
+    pub fn bishops(&self, color: Color) -> u64 {
+        self.bitboards[color as usize][Piece::Bishop as usize]
     }
-    pub fn rooks(&self) -> u64 {
-        self.piece_bitboards[Piece::Rook as usize]
+    #[inline(always)]
+    pub fn rooks(&self, color: Color) -> u64 {
+        self.bitboards[color as usize][Piece::Rook as usize]
     }
-    pub fn queens(&self) -> u64 {
-        self.piece_bitboards[Piece::Queen as usize]
+    #[inline(always)]
+    pub fn queens(&self, color: Color) -> u64 {
+        self.bitboards[color as usize][Piece::Queen as usize]
     }
-    pub fn kings(&self) -> u64 {
-        self.piece_bitboards[Piece::King as usize]
+    #[inline(always)]
+    pub fn kings(&self, color: Color) -> u64 {
+        self.bitboards[color as usize][Piece::King as usize]
     }
+    #[inline(always)]
     pub fn white(&self) -> u64 {
-        self.color_bitboards[Color::White as usize]
+        self.occupancy[Color::White as usize]
     }
+    #[inline(always)]
     pub fn black(&self) -> u64 {
-        self.color_bitboards[Color::Black as usize]
+        self.occupancy[Color::Black as usize]
     }
-
+    #[inline(always)]
     pub fn occupied(&self) -> u64 {
         self.black() | self.white()
     }
-
-    pub fn piece_at_sq(&self, sq: u8) -> Option<Piece> {
-        decode_piece(self.board[sq as usize]).map(|(piece, _)| piece)
+    #[inline(always)]
+    pub fn zobrist(&self) -> u64 {
+        self.zobrist
     }
 
+    #[inline(always)]
+    pub fn half_move(&self) -> u8 {
+        self.half_move
+    }
+
+    #[inline(always)]
+    pub fn state_info(&self) -> StateInfo {
+        self.state_info
+    }
+    #[inline(always)]
+    pub fn piece_exists_sq(&self, sq: u8) -> bool {
+        self.board[sq as usize] != EMPTY_PIECE
+    }
+
+    #[inline(always)]
+    pub fn colored_piece_at_sq(&self, sq: u8) -> ColoredPiece {
+        self.board[sq as usize]
+    }
+    
+
+    #[inline(always)]
+    pub fn piece_at_sq(&self, sq: u8) -> Piece {
+        let colored_piece = self.board[sq as usize];
+        to_piece(colored_piece)
+    }
+
+    #[inline(always)]
     pub fn is_slider(&self, sq: u8) -> bool {
-        self.piece_at_sq(sq)
-            .map(|piece| piece == Piece::Bishop || piece == Piece::Rook || piece == Piece::Queen)
-            .unwrap_or(false)
+        is_slider_val(self.board[sq as usize])
     }
 
-
-    pub fn en_passant_capture_pawn(&self) -> u8 {
-        if self.en_passant == 64 {
-            panic!("No en passant possible!");
-        }
-        match self.turn {
-            Color::White => self.en_passant - 8, // white to move, the en passant square is PAST the pawn
-            Color::Black => self.en_passant + 8 // black to move, vice versa
-        }
-    }
-
+    #[inline(always)]
     pub fn en_passant(&self) -> u8 {
         self.en_passant
     }
-
+    #[inline(always)]
     pub fn kingside(&self, color: Color) -> bool {
         self.castling_rights.kingside(color)
     }
-
+    #[inline(always)]
     pub fn queenside(&self, color: Color) -> bool {
         self.castling_rights.queenside(color)
     }
-
-    pub fn board_sq(&self, sq: u8) -> EncodedPiece {
+    #[inline(always)]
+    pub fn board_sq(&self, sq: u8) -> ColoredPiece {
         self.board[sq as usize]
     }
-
+    #[inline(always)]
     pub fn piece_list(&self, piece: Piece, color: Color) -> ([u8; MAX_PIECES], usize)  {
         (self.piece_list[piece as usize][color as usize], self.piece_count[piece as usize][color as usize])
     }
 
+    #[inline(always)]
     pub fn king_square(&self, color: Color) -> u8 {
         self.piece_list[Piece::King as usize][color as usize][0]
     }
 
+    #[inline(always)]
     pub fn get_allies(&self, piece: Piece) -> u64 {
-        self.piece_bitboards[piece as usize]&self.color_bitboards[self.turn as usize]
+        self.bitboards[self.turn as usize][piece as usize]
     }
 
+    #[inline(always)]
     pub fn get_enemies(&self, piece: Piece) -> u64 {
-        self.piece_bitboards[piece as usize]&self.color_bitboards[!self.turn as usize]
+        self.bitboards[!self.turn as usize][piece as usize]
+    }
+    #[inline(always)]
+    pub fn piece_bb(&self, piece: Piece, color: Color) -> u64 {
+        self.bitboards[color as usize][piece as usize]
     }
 
-    pub fn piece_bb(&self, piece: Piece, color: Color) -> u64 {
-        let color_bb = self.occupancy(color);
-        match piece {
-            Piece::Pawn => self.pawns() & color_bb,
-            Piece::Knight => self.knights() & color_bb,
-            Piece::Bishop => self.bishops() & color_bb,
-            Piece::Rook => self.rooks() & color_bb,
-            Piece::Queen => self.queens() & color_bb,
-            Piece::King => self.kings() & color_bb,
+    #[inline(always)]
+    pub fn third_last_move(&self) -> Option<Move> {
+        if self.undo_stack.len < 4 {
+            return None;
+        }
+        Some(self.undo_stack.peek_index((self.undo_stack.len - 4) as usize).mov)
+    }
+
+    #[inline(always)]
+    pub fn undo_stack(&self) -> UndoStack {
+        self.undo_stack.clone()
+    }
+
+    pub fn print_move_history(&self) {
+        println!("Move History: ");
+        for i in 0..self.undo_stack.len {
+            println!("{}", self.undo_stack.data[i as usize].mov);
         }
     }
 
     pub fn print_board(&self) {
-        println!();
         for rank in (0..8).rev() {
             print!("{} ", rank + 1);
             for file in 0..8 {
                 let sq = rank * 8 + file;
-                let piece = self.board[sq as usize];
-                let symbol = if piece == EMPTY_PIECE {
+                let colored_piece = self.board[sq as usize];
+                let symbol = if is_empty(colored_piece) {
                     '.'
                 } else {
-                    let (p, c) = decode_piece(piece).unwrap();
+                    let p = to_piece(colored_piece);
+                    let c = to_color(colored_piece);
                     let ch = match p {
                         Piece::Pawn => 'p',
                         Piece::Knight => 'n',
@@ -625,7 +978,7 @@ fn square_index(row: usize, col: usize) -> usize {
     (7 - row)* 8 + col // (7 - row) because fens start from black pieces for some reason
 }
 
-fn piece_from_char(ch: char) -> EncodedPiece {
+fn piece_from_char(ch: char) -> ColoredPiece {
     let color = if ch.is_uppercase() { Color::White } else { Color::Black };
 
     let piece = match ch.to_ascii_lowercase() {
@@ -635,32 +988,34 @@ fn piece_from_char(ch: char) -> EncodedPiece {
         'r' => Piece::Rook,
         'q' => Piece::Queen,
         'k' => Piece::King,
-        _ => return EMPTY_PIECE, // invalid input
+        _ => unreachable!("Input is broken")
     };
 
-    encode_piece(piece, color)
+    piece_to_val(piece, color)
 }
 
 
 fn update_bitboards_pieces(position: &mut Position, ch: char, square: u8) {
-    let encoded = piece_from_char(ch);
-
-    if encoded != EMPTY_PIECE {
-        if let Some((piece, color)) = decode_piece(encoded) {
-            let bit = 1u64 << square;
-            let p = piece as usize;
-            let c = color as usize;
-
-            let count = position.piece_count[p][c];
-            position.piece_list[p][c][count] = square;
-            position.piece_count[p][c] += 1;
-            position.reverse_piece_index[p][c][square as usize] = Some(count);
-
-            position.piece_bitboards[p] |= bit;
-            position.color_bitboards[c] |= bit;
-            position.board[square as usize] = encoded;
-        }
+    let colored_piece = piece_from_char(ch);
+    if is_empty(colored_piece) {
+        return;
     }
+
+
+    let bit = 1u64 << square;
+    let p = to_piece(colored_piece) as usize;
+    let c = to_color(colored_piece) as usize;
+
+    position.zobrist ^= zobrist::PIECE_SQUARES[square as usize][p][c];
+
+    let count = position.piece_count[p][c];
+    position.piece_list[p][c][count] = square;
+    position.piece_count[p][c] += 1;
+    position.reverse_piece_index[p][c][square as usize] = count as u8;
+
+    position.bitboards[c][p] |= bit;
+    position.occupancy[c]    |= bit;
+    position.board[square as usize] = colored_piece;
 }
 
 
@@ -740,10 +1095,81 @@ fn update_bitboards_pieces(position: &mut Position, ch: char, square: u8) {
 
 
 
-#[cfg(test)]
 mod tests {
-    use crate::mov::MoveFlags;
     use super::*;
+
+
+    /// Cheap in release, exhaustive in debug.
+    #[allow(dead_code)]
+    pub fn assert_consistent(position: &Position, yuh: &str) {
+        let consistent = is_consistent(position);
+        if !consistent {
+            println!("Yuh: {}", yuh);
+        }
+        debug_assert!(consistent,
+                      "Position corruption detected; see stderr for details");
+    }
+
+    /// Thorough but slow: call only under `debug_assert!`.
+    ///
+    ///
+    // c5c4
+    // h2g3
+    // e8e1
+    // g3g4
+    // e1g1
+    // g2g4
+
+    #[allow(dead_code)]
+    pub fn is_consistent(position: &Position) -> bool {
+
+        // 1.  Board ↔ bitboards
+        for sq in 0..64 {
+            let colored_piece = position.board[sq];
+            let on_board = colored_piece != EMPTY_PIECE;
+            let in_bb    =
+                (position.occupancy[0] | position.occupancy[1]) & (1u64 << sq) != 0;
+            if on_board != in_bb {
+                position.print_move_history();
+                position.print_board();
+                eprintln!("square {} board/bitboard mismatch", square_name(sq as u8));
+                return false
+            }
+        }
+
+        // 2.  Board ↔ reverse_piece_index / piece_list
+        for p in 0..6 {
+            for c in 0..2 {
+                for idx in 0..position.piece_count[p][c] {
+                    let sq = position.piece_list[p][c][idx] as usize;
+                    if sq > 63 {
+                        eprintln!("NUMBER OF PAWNS: {} ", position.piece_count[p][c]);
+                        eprintln!("HALF MOVE: {}", position.half_move());
+                        eprintln!("square {sq} board/bitboard mismatch");
+                        eprintln!("piece list and reverse index disagree for {p:?}/{c} idx {idx}");
+                    }
+                    if position.reverse_piece_index[p][c][sq] != idx as u8 {
+                        eprintln!("NUMBER OF PAWNS: {} ", position.piece_count[p][c]);
+
+                        eprintln!("Reverse piece index: {:?}", position.reverse_piece_index[p][c][sq]);
+                        eprintln!("square {sq} board/bitboard mismatch");
+                        eprintln!("piece list and reverse index disagree for {p:?}/{c} idx {idx}");
+                        return false
+                    }
+                    if position.board[sq] == EMPTY_PIECE {
+                        eprintln!("piece list says a piece is on empty square {sq}");
+                        return false
+                    }
+                }
+            }
+        }
+
+        // 3.  Side to move sanity, castling rights squares contain correct rook/king, etc.
+        //      (Fill in the details that matter for your engine.)
+        true
+    }
+
+
     #[test]
     fn test_starting_position_piece_list() {
         let pos = Position::start();
@@ -754,6 +1180,7 @@ mod tests {
         }
 
         let (black_rooks, count) = pos.piece_list(Piece::Rook, Color::Black);
+        assert_consistent(&pos, "");
         assert_eq!(count, 2);
         assert_eq!(black_rooks[0], 56);
         assert_eq!(black_rooks[1], 63);
@@ -762,16 +1189,16 @@ mod tests {
     #[test]
     fn test_starting_position_bitboards() {
         let pos = Position::start();
-        assert_eq!(pos.pawns() & pos.white(), 0xFF00);
-        assert_eq!(pos.pawns() & pos.black(), 0x00FF000000000000);
-        assert_eq!(pos.rooks() & pos.white(), 0x81);
-        assert_eq!(pos.rooks() & pos.black(), 0x8100000000000000);
+        assert_eq!(pos.pawns(Color::White), 0xFF00);
+        assert_eq!(pos.pawns(Color::Black), 0x00FF000000000000);
+        assert_eq!(pos.rooks(Color::White), 0x81);
+        assert_eq!(pos.rooks(Color::Black), 0x8100000000000000);
     }
 
     #[test]
     fn test_en_passant_square_none_in_startpos() {
         let pos = Position::start();
-        assert_eq!(pos.en_passant(), 64);
+        assert_eq!(pos.en_passant(), NO_SQ);
     }
 
     #[test]
@@ -779,45 +1206,117 @@ mod tests {
         let mut pos = Position::start();
         let from = 12; // d2
         let to = 28; // d4
-        let encoded = encode_piece(Piece::Pawn, Color::White);
+        let colored_piece = piece_to_val(Piece::Pawn, Color::White);
 
-        pos.board[from] = encoded;
+        pos.board[from] = colored_piece;
         pos.board[to] = EMPTY_PIECE;
-        pos.reverse_piece_index[Piece::Pawn as usize][Color::White as usize][from] = Some(0);
+        pos.reverse_piece_index[Piece::Pawn as usize][Color::White as usize][from] = 0;
         pos.piece_list[Piece::Pawn as usize][Color::White as usize][0] = from as u8;
 
         pos.move_piece(Piece::Pawn, Color::White, from, to);
 
-        assert_eq!(pos.board[to], encoded);
+        assert_eq!(pos.board[to], colored_piece);
         assert_eq!(pos.board[from], EMPTY_PIECE);
-        assert_ne!(pos.pawns() & (1u64 << to), 0);
-        assert_eq!(pos.pawns() & (1u64 << from), 0);
     }
 
     #[test]
+    fn test_square_under_attack() {
+        let pos = Position::load_position_from_fen("8/8/8/3q4/8/8/4K3/8 w - - 0 1");
+        assert!(pos.square_under_attack(3, Color::Black)); // e2 is attacked by d5 queen
+    }
+
+    #[test]
+    fn test_compute_pins_checks() {
+        // test check detection
+
+        let pos = Position::load_position_from_fen("4k3/8/8/8/4r3/8/4K3/8 w - - 0 1");
+        let info = pos.compute_pins_checks(Color::White);
+        assert_ne!(info.checkers, 0); // king is in check
+        assert_eq!(info.blockers_for_king, 0); // no pin
+        assert_eq!(info.pinners, 0); // no pinners
+
+        // test pin detection
+        let pos2 = Position::load_position_from_fen("qrb1knnr/pppp1ppp/4p3/8/4P2b/8/PPPP1PPP/QRBBKNNR w - - 0 1");
+        let info2 = pos2.compute_pins_checks(Color::White);
+        assert_eq!(info2.checkers, 0); // no check
+        assert_ne!(info2.blockers_for_king, 0); // pin
+        assert_ne!(info2.pinners, 0); // pinners
+    }
+
+
+
+    #[test]
     fn test_do_move_basic_pawn_push() {
-        use crate::mov::MoveKind;
         let mut pos = Position::start();
         let from = 12; // d2
         let to = 28; // d4
-        let encoded = encode_piece(Piece::Pawn, Color::White);
-        pos.board[from] = encoded;
-        pos.reverse_piece_index[Piece::Pawn as usize][Color::White as usize][from] = Some(0);
+        let colored_piece = piece_to_val(Piece::Pawn, Color::White);
+        pos.board[from] = colored_piece;
+        pos.reverse_piece_index[Piece::Pawn as usize][Color::White as usize][from] = 0;
         pos.piece_list[Piece::Pawn as usize][Color::White as usize][0] = from as u8;
 
-        let mov = Move::encode(from as u8, to as u8, MoveFlags::new(MoveKind::DoublePush));
+        let mov = Move::encode(from as u8, to as u8, flag::DOUBLE_PAWN_PUSH);
+        println!("{}", mov);
         pos.do_move(mov);
 
-        assert_eq!(pos.board[to], encoded);
+        assert_eq!(pos.board[to], colored_piece);
         assert_eq!(pos.board[from], EMPTY_PIECE);
         assert_eq!(pos.en_passant(), 20); // square between d2 and d4
         assert_eq!(pos.turn(), Color::Black);
     }
+
+    #[test]
+    fn test_undo_move_restores_position() {
+        let mut pos = Position::start();
+        let original_pos = pos.clone(); // Make sure Position derives Clone
+
+        let from = 12; // d2
+        let to = 28;   // d4
+        let mov = Move::encode(from, to, flag::DOUBLE_PAWN_PUSH);
+
+        pos.do_move(mov);
+        pos.undo_move();
+
+        assert_eq!(pos.board, original_pos.board);
+        assert_eq!(pos.bitboards, original_pos.bitboards);
+        assert_eq!(pos.occupancy, original_pos.occupancy);
+        assert_eq!(pos.turn(), original_pos.turn());
+        assert_consistent(&pos,"");
+    }
+
+    #[test]
+    fn test_pawn_promotion() {
+        let mut pos = Position::load_position_from_fen("8/P7/8/8/8/8/8/4k3 w - - 0 1");
+        let from = 48;  // a7
+        let to = 56;    // a8
+
+        let mov = Move::encode(from, to, flag::PROMO_QUEEN);
+        pos.do_move(mov);
+
+        assert_eq!(pos.piece_at_sq(to), Piece::Queen);
+        assert_eq!(pos.board[to as usize], piece_to_val(Piece::Queen, Color::White));
+    }
+
+    #[test]
+    fn test_castling_kingside_white() {
+        let mut pos = Position::load_position_from_fen("4k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        let from = 4; // e1
+        let to = 6;   // g1
+
+        let mov = Move::encode(from, to, flag::KING_CASTLE);
+        pos.do_move(mov);
+
+        assert_eq!(pos.piece_at_sq(6), Piece::King);
+        assert_eq!(pos.piece_at_sq(5), Piece::Rook);
+    }
+
+
+
 }
 
 pub fn square_name(index: u8) -> String {
-    let file = (index % 8) as u8;
-    let rank = (index / 8) as u8;
+    let file = index % 8;
+    let rank = index / 8;
     let file_char = (b'a' + file) as char;
     let rank_char = (b'1' + rank) as char;
     format!("{}{}", file_char, rank_char)

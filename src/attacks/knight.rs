@@ -1,7 +1,7 @@
-use crate::attacks::tables::{KNIGHT_MOVES};
+use crate::tables::{KNIGHT_MOVES};
 use crate::bitboards::{pop_lsb};
 use crate::color::Color;
-use crate::mov::{Move, MoveFlags, MoveKind, MoveList};
+use crate::mov::{Move, flag, MoveList};
 use crate::piece::Piece;
 use crate::position::{Position, StateInfo};
 
@@ -20,11 +20,11 @@ pub (in crate::attacks) fn knight_moves(position: &Position, allies: u64, enemie
         let capture = all & enemies;
 
         pop_lsb(quiet, |to| {
-            moves.push(Move::encode(from, to, MoveFlags::new(MoveKind::Quiet)));
+            moves.push(Move::encode(from, to, flag::QUIET));
         });
 
         pop_lsb(capture, |to| {
-            moves.push(Move::encode(from, to, MoveFlags::new(MoveKind::Capture)));
+            moves.push(Move::encode(from, to, flag::CAPTURE));
         });
     }
 }
@@ -45,11 +45,11 @@ pub fn knight_moves_evasion(position: &Position, info: &StateInfo, enemies: u64,
         let capture = all & enemies & block_mask;
 
         pop_lsb(quiet, |to| {
-            moves.push(Move::encode(from, to, MoveFlags::new(MoveKind::Quiet)));
+            moves.push(Move::encode(from, to, flag::QUIET));
         });
 
         pop_lsb(capture, |to| {
-            moves.push(Move::encode(from, to, MoveFlags::new(MoveKind::Capture)));
+            moves.push(Move::encode(from, to, flag::CAPTURE));
         });
     }
 

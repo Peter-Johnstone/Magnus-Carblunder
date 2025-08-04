@@ -1,4 +1,4 @@
-use crate::attacks::tables::{BETWEEN_EXCLUSIVE, BETWEEN_INCLUSIVE, LINE_BB};
+use crate::tables::{BETWEEN_INCLUSIVE, LINE_BB};
 
 #[derive(Copy, Clone, Debug, Default)]
 pub struct StateInfo {
@@ -7,6 +7,11 @@ pub struct StateInfo {
     pub pinners: u64,
 }
 impl StateInfo {
+
+    pub const fn default() -> Self {
+        StateInfo {checkers: 0, blockers_for_king: 0, pinners: 0}
+    }
+
     pub fn new(checkers: u64, blockers_for_king: u64, pinners: u64) -> Self {
         Self { checkers, blockers_for_king, pinners }
     }

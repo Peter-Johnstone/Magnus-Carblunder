@@ -1,131 +1,229 @@
+use std::cmp::Ordering;
 use std::fmt;
-use std::fmt::Debug;
+use rand::Rng;
 use crate::piece::Piece;
 use crate::position;
 
-#[repr(u8)]
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub enum MoveKind {
-    Quiet       = 0,
-    DoublePush  = 1,
-    Capture     = 2,
-    EnPassant   = 3,
-    Castling    = 4,
-}
+#[repr(transparent)]
+#[derive(Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug)]
+pub struct Move(u16);
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub struct MoveFlags(u8);
-
-impl MoveFlags {
-    const REGULAR_BITS: u8 = 4;               // bits 0‑3
-    const PROMO_FLAG:  u8 = 1 << Self::REGULAR_BITS;      // bit 4
-    const PROMO_SHIFT: u8 = Self::REGULAR_BITS + 1;       // bits 5‑6
-
-    /// Non‑promotion constructor
-    pub const fn new(kind: MoveKind) -> Self {
-        MoveFlags(kind as u8)                 // promo flag = 0
-    }
-
-    /// Promotion constructor
-    pub const fn with_promote(kind: MoveKind, piece: Piece) -> Self {
-        debug_assert!(matches!(
-            piece,
-            Piece::Knight | Piece::Bishop | Piece::Rook | Piece::Queen
-        ));
-        // Knight→0, Bishop→1, Rook→2, Queen→3
-        let piece_bits = ((piece as u8 - 1) & 0b11) << Self::PROMO_SHIFT;
-        MoveFlags((kind as u8) | Self::PROMO_FLAG | piece_bits)
-    }
+pub mod flag {
+    pub const QUIET:                u16 = 0;
+    pub const DOUBLE_PAWN_PUSH:     u16 = 1;
+    pub const KING_CASTLE:          u16 = 2;
+    pub const QUEEN_CASTLE:         u16 = 3;
+    pub const CAPTURE:              u16 = 4;
+    pub const EN_PASSANT:           u16 = 5;
+    pub const PROMO_KNIGHT:         u16 = 8;
+    pub const PROMO_BISHOP:         u16 = 9;
+    pub const PROMO_ROOK:           u16 = 10;
+    pub const PROMO_QUEEN:          u16 = 11;
+    pub const PROMO_KNIGHT_CAPTURE: u16 = 12;
+    pub const PROMO_BISHOP_CAPTURE: u16 = 13;
+    pub const PROMO_ROOK_CAPTURE:   u16 = 14;
+    pub const PROMO_QUEEN_CAPTURE:  u16 = 15;
 }
 
 
-#[derive(Debug, Copy, Clone)]
-pub struct Move {
-    from: u8,
-    to: u8,
-    flags: MoveFlags,
-}
 
-impl Default for Move {
-    fn default() -> Self {
-        Move {
-            from: 64,
-            to: 64,
-            flags: MoveFlags::new(MoveKind::Quiet), // or some invalid combo
-        }
-    }
-}
+// Shifts
+const FROM_SHIFT: u16 = 0;
+const TO_SHIFT: u16 = 6;
+const FLAG_SHIFT: u16 = 12;
+
+// Masks
+const FROM_MASK: u16 = 0x003F;
+const TO_MASK:   u16 = 0x0FC0;
+const FLAG_MASK: u16 = 0xF000;
+
 
 impl Move {
-    pub fn encode(from: u8, to: u8, flags: MoveFlags) -> Move {
-        Move { from, to, flags}
+
+    #[inline(always)]
+    pub fn new(mov: u16) -> Move {
+        Move(mov)
+    }
+    #[inline(always)]
+    pub fn encode(from: u8, to: u8, flags: u16) -> Move {
+        Move(
+            (from as u16)   << FROM_SHIFT  |
+            (to as u16)     << TO_SHIFT    |
+            (flags & 0xF)   << FLAG_SHIFT
+        )
     }
 
-    pub fn to(&self) -> u8{
-        self.to
+    pub fn encode_from_string(from: &str, to: &str, flags: &str) -> Move {
+        let from_sq = algebraic_to_index(from);
+        let to_sq = algebraic_to_index(to);
+        let flag_val = match flags.to_uppercase().as_str() {
+            "QUIET" => flag::QUIET,
+            "DOUBLE_PAWN_PUSH" => flag::DOUBLE_PAWN_PUSH,
+            "KING_CASTLE" => flag::KING_CASTLE,
+            "QUEEN_CASTLE" => flag::QUEEN_CASTLE,
+            "CAPTURE" => flag::CAPTURE,
+            "EN_PASSANT" => flag::EN_PASSANT,
+            "PROMO_KNIGHT" => flag::PROMO_KNIGHT,
+            "PROMO_BISHOP" => flag::PROMO_BISHOP,
+            "PROMO_ROOK" => flag::PROMO_ROOK,
+            "PROMO_QUEEN" => flag::PROMO_QUEEN,
+            "PROMO_KNIGHT_CAPTURE" => flag::PROMO_KNIGHT_CAPTURE,
+            "PROMO_BISHOP_CAPTURE" => flag::PROMO_BISHOP_CAPTURE,
+            "PROMO_ROOK_CAPTURE" => flag::PROMO_ROOK_CAPTURE,
+            "PROMO_QUEEN_CAPTURE" => flag::PROMO_QUEEN_CAPTURE,
+            _ => unreachable!("Please enter valid flags")
+        };
+
+        Move::encode(from_sq, to_sq, flag_val)
     }
+
+    pub fn is_null(&self) -> bool {
+        self.0 == 0
+    }
+    pub const fn null() -> Self {
+        Move(0)
+    }
+    #[inline(always)]
+    pub fn to(&self) -> u8 {
+        ((self.0 & TO_MASK) >> TO_SHIFT) as u8
+    }
+    #[inline(always)]
     pub fn from(&self) -> u8{
-        self.from
+        ((self.0 & FROM_MASK) >> FROM_SHIFT) as u8
+    }
+    #[inline(always)]
+    pub(crate) fn flag(&self) -> u16 {
+        (self.0 & FLAG_MASK) >> FLAG_SHIFT
     }
 
-    pub(crate) fn kind(&self) -> MoveKind {
-        match self.flags.0 & 0b1111 {
-            0 => MoveKind::Quiet,
-            1 => MoveKind::DoublePush,
-            2 => MoveKind::Capture,
-            3 => MoveKind::EnPassant,
-            4 => MoveKind::Castling,
 
+    #[inline(always)]
+    pub fn promotion_piece(self) -> Piece {
+        debug_assert!(self.is_promotion());
+        match self.flag() & 0b0011 {
+            0 => Piece::Knight,
+            1 => Piece::Bishop,
+            2 => Piece::Rook,
+            3 => Piece::Queen,
             _ => unreachable!(),
         }
     }
 
-
-    pub fn is_promotion(&self) -> bool {
-        self.flags.0 & MoveFlags::PROMO_FLAG != 0
-    }
-
-    pub fn promotion_piece(&self) -> Option<Piece> {
-        if !self.is_promotion() {
-            return None;
-        }
-        match (self.flags.0 >> MoveFlags::PROMO_SHIFT) & 0b11 {
-            0 => Some(Piece::Knight),
-            1 => Some(Piece::Bishop),
-            2 => Some(Piece::Rook),
-            3 => Some(Piece::Queen),
-            _ => unreachable!(),
-        }
-    }
-
-    pub fn new_en_passant_square(&self) -> u8 {
-        if self.is_double_push() {
-            (self.to() + self.from()) / 2
-        } else {
-            64
-        }
-    }
-
+    #[inline(always)]
     pub fn is_quiet(&self) -> bool {
-        self.kind() == MoveKind::Quiet
+        self.flag() == flag::QUIET
     }
 
-    pub fn is_double_push(&self) -> bool {
-        self.kind() == MoveKind::DoublePush
+    #[inline(always)]
+    pub fn is_double_push(self) -> bool {
+        self.flag() == flag::DOUBLE_PAWN_PUSH
     }
 
-    pub fn is_capture(&self) -> bool {
-        self.kind() == MoveKind::Capture
+    #[inline(always)]
+    pub fn is_en_passant(self) -> bool {
+        self.flag() == flag::EN_PASSANT
     }
 
-    pub fn is_en_passant(&self) -> bool {
-        self.kind() == MoveKind::EnPassant
+    #[inline(always)]
+    pub fn is_king_castle(self) -> bool {
+        self.flag() == flag::KING_CASTLE
     }
-    
-    pub fn is_castling(&self) -> bool {
-        self.kind() == MoveKind::Castling
+
+    #[inline(always)]
+    pub fn is_queen_castle(self) -> bool {
+        self.flag() == flag::QUEEN_CASTLE
+    }
+
+    #[inline(always)]
+    pub fn is_capture(self) -> bool {
+        matches!(self.flag(),
+        flag::CAPTURE
+      | flag::PROMO_KNIGHT_CAPTURE
+      | flag::PROMO_BISHOP_CAPTURE
+      | flag::PROMO_ROOK_CAPTURE
+      | flag::PROMO_QUEEN_CAPTURE
+    )
+    }
+
+    #[inline(always)]
+    pub fn is_castling(self) -> bool {
+        matches!(self.flag(), flag::KING_CASTLE | flag::QUEEN_CASTLE)
+    }
+    #[inline(always)]
+    pub fn is_promotion(self) -> bool {
+        self.flag() & 0b1000 != 0          // bit 3 is set on every promotion code
+    }
+
+
+    pub fn print_raw(self) {
+        println!("{},", self.0);
     }
 }
+
+pub const fn quiet_promo_flag(piece: Piece) -> u16 {
+    match piece {
+        Piece::Knight => flag::PROMO_KNIGHT,
+        Piece::Bishop => flag::PROMO_BISHOP,
+        Piece::Rook   => flag::PROMO_ROOK,
+        Piece::Queen  => flag::PROMO_QUEEN,
+        _ => panic!("invalid promotion piece"),
+    }
+}
+
+pub const fn capture_promo_flag(piece: Piece) -> u16 {
+    match piece {
+        Piece::Knight => flag::PROMO_KNIGHT_CAPTURE,
+        Piece::Bishop => flag::PROMO_BISHOP_CAPTURE,
+        Piece::Rook   => flag::PROMO_ROOK_CAPTURE,
+        Piece::Queen  => flag::PROMO_QUEEN_CAPTURE,
+        _ => panic!("invalid promotion piece"),
+    }
+}
+
+/// bit‑3 = promotion, bit‑2 = capture
+#[inline(always)]
+pub fn is_flag_quiet_promo(flag: u16) -> bool {
+    flag & 0b1000 != 0 && flag & 0b0100 == 0       // 8‑11
+}
+
+#[inline(always)]
+pub fn is_flag_capture_promo(flag: u16) -> bool {
+    flag & 0b1100 == 0b1100                        // 12‑15
+}
+
+#[inline(always)]
+fn algebraic_to_index(square: &str) -> u8 {
+    if square.len() != 2 {
+        panic!("invalid square length");
+    }
+    let bytes = square.as_bytes();
+    let file = bytes[0].to_ascii_lowercase();
+    let rank = bytes[1];
+
+    if !(b'a'..=b'h').contains(&file) || !(b'1'..=b'8').contains(&rank) {
+        panic!("invalid rank");
+    }
+
+    let file_idx = file - b'a';
+    let rank_idx = rank - b'1';
+
+    rank_idx * 8 + file_idx
+}
+#[inline(always)]
+pub fn index_to_algebraic(square: u8) -> String {
+    if square > 63 {
+        panic!("invalid square {square}");
+    }
+    let file = square % 8;
+    let rank = square / 8;
+
+    let file_char = (b'a' + file) as char;
+    let rank_char = (b'1' + rank) as char;
+
+    format!("{file_char}{rank_char}")
+}
+
 
 
 pub const MAX_MOVES: usize = 256; // Safe upper bound
@@ -144,6 +242,43 @@ impl MoveList {
         }
     }
 
+
+    #[inline(always)]
+    pub fn swap(&mut self, i: usize, j: usize) {
+        if i < self.len && j < self.len {
+            let tmp = self.moves[i];
+            self.moves[i] = self.moves[j];
+            self.moves[j] = tmp;
+        }
+    }
+
+
+    #[inline(always)]
+    pub fn get(&self, index: usize) -> Move {
+        self.moves[index]
+    }
+
+    #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
+    pub fn random(&self) -> Move {
+        let num = rand::rng().random_range(0..self.len);
+        self.moves[num]
+    }
+
+    #[inline(always)]
+    pub fn sort_by<F>(&mut self, mut cmp: F)
+    where
+        F: FnMut(Move, Move) -> Ordering,
+    {
+        // only the first `len` entries are meaningful
+        self.moves[..self.len].sort_by(|a, b| cmp(*a, *b));
+    }
+
+    #[inline(always)]
     pub fn peek(&self) -> Move {
         if self.len > 1 {
             return self.moves[self.len - 1]
@@ -151,21 +286,24 @@ impl MoveList {
         Move::default()
     }
 
+    #[inline(always)]
     pub fn moves_from_square(&self, square: u8) -> MoveList {
         let mut square_moves = MoveList::new();
         for mov in self.moves {
-            if mov.from == square {
+            if mov.from() == square {
                 square_moves.push(mov);
             }
         }
         square_moves
     }
 
+    #[inline(always)]
     pub fn push(&mut self, m: Move) {
         self.moves[self.len] = m;
         self.len += 1;
     }
 
+    #[inline(always)]
     pub fn iter(&self) -> impl Iterator<Item = Move> {
         self.moves[..self.len].iter().copied()
     }
@@ -173,14 +311,18 @@ impl MoveList {
 
 impl fmt::Display for Move {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_null(){
+            write!(f, "NULL")?;
+            return Ok(())
+        }
         write!(
             f,
             "{}{}",
-            position::square_name(self.from),
-            position::square_name(self.to)
+            position::square_name(self.from()),
+            position::square_name(self.to())
         )?;
-        if let Some(promo) = self.promotion_piece() {
-            write!(f, "{}", promo.piece_initial())?;
+        if self.is_promotion() {
+            write!(f, "{}", self.promotion_piece().piece_initial())?;
         }
 
         Ok(())
@@ -189,10 +331,54 @@ impl fmt::Display for Move {
 }
 
 impl fmt::Debug for MoveList {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list()
             .entries(&self.moves[..self.len])
             .finish()
     }
 }
 
+
+
+
+
+
+
+
+
+const NEW_EN_PASSANT_FROM: [u8; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0,
+    16,17,18,19,20,21,22,23,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    40,41,42,43,44,45,46,47,
+    0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+#[inline(always)]
+pub fn new_en_passant_square(from: usize) -> u8 {
+    NEW_EN_PASSANT_FROM[from]
+}
+
+
+
+
+// returns the square of the en_passant captured piece given the square the move goes to.
+const CAPTURED_SQUARE_TO: [usize; 64] = [
+     0, 0, 0, 0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0,
+    24,25,26,27,28,29,30,31,
+     0, 0, 0, 0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0,
+    32,33,34,35,36,37,38,39,
+    0, 0, 0, 0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+
+#[inline(always)]
+pub fn en_passant_capture_pawn(to: usize) -> usize {
+    CAPTURED_SQUARE_TO[to]
+}

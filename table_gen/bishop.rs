@@ -151,13 +151,3 @@ pub(crate) fn build_bishop_table() -> Vec<[u64; 512]> {
 
     table
 }
-fn gen_bishop_shifts() -> [u8; 64] {
-    let masks = BISHOP_MASKS;
-    let mut out = [0u8; 64];
-    let mut i = 0;
-    while i < 64 {
-        out[i] = 64 - masks[i].count_ones() as u8;
-        i += 1;
-    }
-    out
-}

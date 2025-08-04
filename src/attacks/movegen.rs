@@ -2,7 +2,7 @@ use crate::attacks::king::{king_attacks, king_moves};
 use crate::attacks::knight::{knight_attacks, knight_moves, knight_moves_evasion};
 use crate::attacks::pawn::{pawn_attacks, pawn_moves, pawn_moves_evasion};
 use crate::attacks::sliding::{bishop_attacks, bishop_moves, bishop_moves_evasion, queen_attacks, queen_moves, queen_moves_evasion, rook_attacks, rook_moves, rook_moves_evasion};
-use crate::attacks::tables::{BETWEEN_EXCLUSIVE, LINE_BB};
+use crate::tables::{BETWEEN_EXCLUSIVE, LINE_BB};
 use crate::mov::MoveList;
 use crate::color::Color;
 use crate::position::{StateInfo, Position};
@@ -15,7 +15,7 @@ pub fn all_moves(position: &Position) -> MoveList {
     let enemies: u64 = position.occupancy(!us);
     let mut moves = MoveList::new();
 
-    let info = position.compute_pins_checks(us);
+    let info = position.state_info();
     let in_check = info.is_check();
 
     let unsafe_squares = all_attacks(position, !us);

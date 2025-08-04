@@ -1,7 +1,7 @@
 use crate::color::Color;
-use crate::attacks::tables::{BISHOP_ATTACKS, BISHOP_MAGICS, BISHOP_MASKS, BISHOP_SHIFTS, ROOK_ATTACKS, ROOK_MAGICS, ROOK_MASKS, ROOK_SHIFTS};
-use crate::bitboards::{pop_lsb, print_bitboard, FULL_BB};
-use crate::mov::{Move, MoveFlags, MoveKind, MoveList};
+use crate::tables::{BISHOP_ATTACKS, BISHOP_MAGICS, BISHOP_MASKS, BISHOP_SHIFTS, ROOK_ATTACKS, ROOK_MAGICS, ROOK_MASKS, ROOK_SHIFTS};
+use crate::bitboards::{pop_lsb, FULL_BB};
+use crate::mov::{Move, flag, MoveList};
 use crate::piece::Piece;
 use crate::position::{Position, StateInfo};
 
@@ -70,10 +70,10 @@ fn diagonal_moves(allies: u64, enemies: u64, move_mask: u64, moves: &mut MoveLis
     let capture_bb: u64 = attacks & enemies;
 
     pop_lsb(quiet_bb, |to| {
-        moves.push(Move::encode(sq, to, MoveFlags::new(MoveKind::Quiet)))
+        moves.push(Move::encode(sq, to, flag::QUIET))
     });
     pop_lsb(capture_bb, |to| {
-        moves.push(Move::encode(sq, to, MoveFlags::new(MoveKind::Capture)))
+        moves.push(Move::encode(sq, to, flag::CAPTURE))
     });
 }
 
@@ -94,10 +94,10 @@ fn orthogonal_moves(allies: u64, enemies: u64, move_mask: u64, moves: &mut MoveL
     let capture_bb: u64 = attacks & enemies;
 
     pop_lsb(quiet_bb, |to| {
-        moves.push(Move::encode(sq, to, MoveFlags::new(MoveKind::Quiet)))
+        moves.push(Move::encode(sq, to, flag::QUIET))
     });
     pop_lsb(capture_bb, |to| {
-        moves.push(Move::encode(sq, to, MoveFlags::new(MoveKind::Capture)))
+        moves.push(Move::encode(sq, to, flag::CAPTURE))
     });
 }
 

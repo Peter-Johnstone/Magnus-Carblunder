@@ -29,7 +29,7 @@ fn main() {
         }
     }
 
-    let out_dir = Path::new("src/attacks/tables");
+    let out_dir = Path::new("src/tables");
     fs::create_dir_all(out_dir).unwrap();
 
     write_rook_attack_table(out_dir);
@@ -42,6 +42,7 @@ fn main() {
     write_between_exclusive_table(out_dir);
     write_between_inclusive_table(out_dir);
     write_line_bb_table(out_dir);
+    //write_zobrist_randoms(out_dir);
     write_rays(out_dir);
 }
 
@@ -62,6 +63,56 @@ fn write_bishop_attack_table(out_dir: &Path) {
         content += "],\n";
     }
     content += "];\n";
+
+    write_if_changed(&dest, &content);
+}
+
+
+#[allow(dead_code)]
+fn write_zobrist_randoms(out_dir: &Path) {
+    let randoms_pieces = table_gen::zobrists_randoms::zobrist_randoms_pieces();
+    let dest = out_dir.join("zobrist.rs");
+
+    let mut content = String::new();
+    content += "pub static PIECE_SQUARES: [[[u64; 2]; 6]; 64] = [\n";
+    for square in &randoms_pieces {
+        content += "    [";
+        for piecetype in square.iter() {
+            content += "    [";
+
+
+            for colorpiece in piecetype {
+                content += &format!("0x{colorpiece:016X}u64, ");
+            }
+            content += "],\n";
+
+        }
+        content += "],\n";
+    }
+    content += "];\n\n\n pub static TURN_IS_BLACK: u64 = ";
+    let black_turn = table_gen::zobrists_randoms::zobrist_randoms_turn();
+    content += &format!("0x{black_turn:016X}u64;");
+
+
+    content += "\n\n\n";
+
+
+    content += "pub static CASTLING: [u64; 4] = [";
+
+    let castling = table_gen::zobrists_randoms::zobrist_randoms_castling();
+    for v in &castling {
+        content += &format!("0x{v:016X}u64, ");
+    }
+    content += "];\n\n\n";
+
+    content += "pub static EN_PASSANT: [u64; 8] = [";
+
+    let en_passant = table_gen::zobrists_randoms::zobrist_randoms_en_passant();
+    for v in &en_passant {
+        content += &format!("0x{v:016X}u64, ");
+    }
+    content += "];\n\n\n";
+
 
     write_if_changed(&dest, &content);
 }

@@ -7,5 +7,6 @@ pub(crate) mod king;
 pub(crate) mod between_exclusive;
 pub(crate) mod between_inclusive;
 pub(crate) mod line_bb;
+pub (crate) mod zobrists_randoms;
 
 mod bitboards;
