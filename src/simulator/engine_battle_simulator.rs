@@ -1,6 +1,8 @@
+use std::thread;
 use std::time::Instant;
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::Rng;
+use rand::{rng, Rng};
+use rand::prelude::ThreadRng;
 use crate::attacks::movegen::all_moves;
 use crate::color::Color;
 use crate::engines::engine_manager::{Engine, NUMBER_OF_EVAL_ALGORITHMS, NUMBER_OF_SEARCH_ALGORITHMS};
@@ -16,7 +18,7 @@ pub  fn battle_against_other_eval_algos(search_algo: u8, eval_algo: u8, time_per
     \n\n\n\n                      SIMULATING ENGINE\
     \n                     [search: {search_algo}, eval: {eval_algo}]
 --------------------------------------------------------------");
-    for i in 1..NUMBER_OF_EVAL_ALGORITHMS+1 {
+    for i in NUMBER_OF_EVAL_ALGORITHMS-1..NUMBER_OF_EVAL_ALGORITHMS+1 {
         if i != eval_algo {
             let mut challenger = Engine::new(search_algo, i, time_per_move);
             let (wins, losses, draws) = simulate_many_battles(&mut challenger, &mut champion, num_battles);
@@ -32,7 +34,7 @@ pub fn battle_against_other_search_algos(search_algo: u8, eval_algo: u8, time_pe
     \n\n\n\n                      SIMULATING ENGINE\
     \n                     [search: {search_algo}, eval: {eval_algo}]
 --------------------------------------------------------------");
-    for i in 9..NUMBER_OF_SEARCH_ALGORITHMS+1 {
+    for i in NUMBER_OF_SEARCH_ALGORITHMS-1..NUMBER_OF_SEARCH_ALGORITHMS + 1 {
         if i != search_algo {
             let mut challenger = Engine::new(i, eval_algo, time_per_move);
             let (wins, losses, draws) = simulate_many_battles(&mut challenger, &mut champion, num_battles);
@@ -57,41 +59,102 @@ pub fn print_bar_graph(wins: usize, losses: usize, draws: usize, challenger_sear
     println!();
 }
 
-
-pub fn simulate_many_battles(challenger: &mut Engine, champion:   &mut Engine, num_battles: u16) -> (usize, usize, usize) {
+pub fn simulate_many_battles(
+    challenger: &mut Engine,
+    champion: &mut Engine,
+    num_battles: u16,
+) -> (usize, usize, usize) {
     let mut wins   = 0usize;
     let mut losses = 0usize;
     let mut draws  = 0usize;
-    let mut rng    = rand::rng();
+
+    const THREAD_BATCH_SIZE: u16 = 10;
+    const NUM_THREADS: u16 = 15;
 
     // ── set up timing + progress ────────────────────────────────────────────────
     let start = Instant::now();
-    let pb = ProgressBar::new(num_battles as u64)
-        .with_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} {elapsed_precise} [{wide_bar:.cyan/blue}] \
-                 {pos}/{len} • ETA {eta_precise}",
-            )
-                .unwrap()
-                .progress_chars("=>-"),
-        );
+    let pb = ProgressBar::new(num_battles as u64).with_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} {elapsed_precise} [{wide_bar:.cyan/blue}] \
+             {pos}/{len} • ETA {eta_precise}",
+        )
+            .unwrap()
+            .progress_chars("=>-"),
+    );
 
-    // ── main loop ───────────────────────────────────────────────────────────────
-    for _ in 0..num_battles {
-        let result = battle(challenger, champion, &mut rng);
-        match result {
-            Checkmate(Color::White) => wins   += 1,
-            Checkmate(Color::Black) => losses += 1,
-            Draw                    => draws  += 1,
-            _                       => {}               // just in case
-        }
-        pb.inc(1);
+    // Distribute battles across threads as evenly as possible
+    let per_thread = num_battles / NUM_THREADS;
+    let remainder  = num_battles % NUM_THREADS;
+
+    // Spawn workers
+    let mut handles = Vec::with_capacity(NUM_THREADS as usize);
+    for i in 0..NUM_THREADS {
+        let n = per_thread + if i < remainder { 1 } else { 0 };
+        if n == 0 { continue; }
+
+        // Each thread gets its OWN engine clones and RNG
+        let mut local_challenger = challenger.clone();
+        let mut local_champion   = champion.clone();
+        let pb_clone = pb.clone();
+
+        // Optional: process in small batches inside each thread (keeps your constant used)
+        handles.push(thread::spawn(move || {
+            let mut rng: ThreadRng = rng();
+            let mut w = 0usize;
+            let mut l = 0usize;
+            let mut d = 0usize;
+
+            // do up to THREAD_BATCH_SIZE at a time
+            let mut remaining = n;
+            while remaining > 0 {
+                let step = remaining.min(THREAD_BATCH_SIZE);
+                let (ww, ll, dd) = simulate_fewer_battles(
+                    &mut local_challenger,
+                    &mut local_champion,
+                    &mut rng,
+                    step,
+                );
+                w += ww; l += ll; d += dd;
+                remaining -= step;
+                pb_clone.inc(step as u64);
+            }
+
+            (w, l, d)
+        }));
+    }
+
+    // Collect results
+    for h in handles {
+        let (w, l, d) = h.join().expect("thread panicked");
+        wins += w; losses += l; draws += d;
     }
 
     pb.finish_with_message(format!("Done in {:?}", start.elapsed()));
     (wins, losses, draws)
 }
 
+fn simulate_fewer_battles(
+    challenger: &mut Engine,
+    champion: &mut Engine,
+    rng: &mut ThreadRng,
+    num_battles: u16,
+) -> (usize, usize, usize) {
+    let mut wins   = 0usize;
+    let mut losses = 0usize;
+    let mut draws  = 0usize;
+
+    for _ in 0..num_battles {
+        let result = battle(challenger, champion, rng);
+        match result {
+            Checkmate(Color::White) => wins += 1,
+            Checkmate(Color::Black) => losses += 1,
+            Draw => draws += 1,
+            _ => {}
+        }
+    }
+
+    (wins, losses, draws)
+}
 
 
  fn battle<R: Rng>(challenger: &mut Engine, champion: &mut Engine, rng: &mut R) -> Status {
@@ -104,15 +167,11 @@ pub fn simulate_many_battles(challenger: &mut Engine, champion:   &mut Engine, n
     let mut position = Position::load_position_from_fen(fen);  // or Position::from_id(position_id)
     let mut moves = 0;
     while !all_moves(&position).is_empty() {
-        if moves > 200 {
-
-            // let mut controller = GameController::new().await;
-            // controller.load_fen(fen);
-            // controller.run_review_game(&mut position.undo_stack()).await;
-            return Draw;
+        if moves > 200 || position.is_three_fold_repetition() || position.half_move_over_ninety_nine() {
+            return Draw
         }
         moves += 1;
-        let mov = if position.turn() == Color::White {
+        let mov = if position.side_to_move() == Color::White {
             champion.pick(&mut position)
         } else {
             challenger.pick(&mut position)

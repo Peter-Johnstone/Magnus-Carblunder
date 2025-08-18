@@ -28,15 +28,12 @@ pub(crate) fn negamax(pos: &mut Position, depth: u8, mut alpha: i16, beta: i16, 
     ctx.nodes += 1;
 
     let orig_alpha = alpha;
-
-    ctx.tt_probes += 1;
-
+    
     /* ----- 1. TT probe ------------------------------------------------- */
     let mut entry_ok  = false;          // is depth high enough for pruning?
     let mut entry     = None;
 
     if let Some(e) = ctx.tt.probe(pos.zobrist()) {
-        ctx.tt_hits += 1;
         entry_ok   = e.depth >= depth;  // evaluate later
         entry      = Some(e);
     }

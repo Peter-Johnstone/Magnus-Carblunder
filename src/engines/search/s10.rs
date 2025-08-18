@@ -1,13 +1,38 @@
-use std::time::Instant;
 use crate::attacks::movegen::all_moves;
 use crate::engines::constants::MAX_DEPTH;
 use crate::engines::engine_manager::Ctx;
 use crate::engines::transposition_table::Bound;
-use crate::mov::{Move, MoveList, MAX_MOVES};
+use crate::mov::{MAX_MOVES, Move, MoveList};
 use crate::piece::Piece;
 use crate::position::{Position, Status};
+use std::time::Instant;
+
+fn score_move(pos: &Position, mv: Move, pv: Move, hash: Move) -> i32 {
+    // ❶  PV move always first
+    if mv == pv { return 1_000_000; }
+
+    // ❷  TT best move just after PV
+    if mv == hash { return 999_999; }
 
 
+    // ❸  Winning captures (MVV-LVA)
+    if mv.is_capture() {
+        let victim = pos.piece_at_sq(mv.to());
+        let aggressor = pos.piece_at_sq(mv.from());
+        if let Some(last_mv) = pos.last_move() {
+            if last_mv.to() == mv.to() {
+                return 10_000 + mvv_lva_score(victim, aggressor) as i32;
+            }
+        };
+        return mvv_lva_score(victim, aggressor) as i32;
+    }
+
+    // ❹  Quiet promotions (e.g. e8=Q with nothing taken)
+    if mv.is_promotion() { return 80_000; }
+
+    // ❺  All other quiets
+    0
+}
 
 pub const PIECE_VALUE: [i16; 6] = [100, 320, 330, 500, 900, 0];
 
@@ -19,36 +44,7 @@ fn mvv_lva_score(victim: Piece, attacker: Piece) -> i16 {
 
 
 
-/// Give every move a numeric priority.
-/// Bigger score ⇒ searched earlier.
-#[inline(always)]
-fn score_move(pos: &Position, mv: Move, pv: Move, hash: Move) -> i32 {
-    // ❶  PV move always first
-    if mv == pv { return 1_000_000; }
-
-    // ❷  TT best move just after PV
-    if mv == hash { return 999_999; }
-
-    // ❸  Winning captures (MVV-LVA)
-    if mv.is_capture() {
-        let victim = pos.piece_at_sq(mv.to());          // you have this helper
-        let aggressor = pos.piece_at_sq(mv.from());
-        return  mvv_lva_score(victim, aggressor) as i32;
-    }
-
-    // ❹  Quiet promotions (e.g. e8=Q with nothing taken)
-    if mv.is_promotion() { return 80_000; }
-
-    // ❺  All other quiets
-    0
-}
-
-
-fn order_moves(pos: &Position,
-               moves: &mut MoveList,
-               pv_move: Move,
-               hash_move: Move)
-{
+fn order_moves(pos: &Position, moves: &mut MoveList, pv_move: Move, hash_move: Move) {
     // 1.  Pre-compute scores once
     let mut scores: [i32; MAX_MOVES] = [0; MAX_MOVES];
     for i in 0..moves.len {
@@ -58,43 +54,39 @@ fn order_moves(pos: &Position,
     // 2.  Insertion sort on the two parallel arrays
     for i in 1..moves.len {
         let mut j = i;
-        let key_mv   = moves.moves[i];
-        let key_sc   = scores[i];
+        let key_mv = moves.moves[i];
+        let key_sc = scores[i];
 
         while j > 0 && scores[j - 1] < key_sc {
             moves.moves[j] = moves.moves[j - 1];
-            scores[j]      = scores[j - 1];
+            scores[j] = scores[j - 1];
             j -= 1;
         }
         moves.moves[j] = key_mv;
-        scores[j]      = key_sc;
+        scores[j] = key_sc;
     }
 }
 
-
-
-
-
-
 pub(crate) fn quiescence(
-    pos:      &mut Position,
+    pos: &mut Position,
     mut alpha: i16,
-    beta:      i16,
-    color:     i16,
-    deadline:  Instant,
-    ctx:       &mut Ctx,
-) -> Option<(i16, Move)>
-{
+    beta: i16,
+    color: i16,
+    deadline: Instant,
+    ctx: &mut Ctx,
+) -> Option<(i16, Move)> {
     /* ---- 0.  time check --------------------------------------- */
-    if Instant::now() >= deadline { return None; }
+    if Instant::now() >= deadline {
+        return None;
+    }
     ctx.nodes += 1;
 
     /* ---- 1.  TT probe ----------------------------------------- */
     if let Some(e) = ctx.tt.probe(pos.zobrist()) {
         // depth == 0 entries are quiescence results
         match e.bound {
-            Bound::Exact          => return Some((e.score, e.mv)),
-            Bound::Lower if e.score >= beta  => return Some((e.score, e.mv)),
+            Bound::Exact => return Some((e.score, e.mv)),
+            Bound::Lower if e.score >= beta => return Some((e.score, e.mv)),
             Bound::Upper if e.score <= alpha => return Some((e.score, e.mv)),
             _ => {} // fall through
         }
@@ -103,29 +95,37 @@ pub(crate) fn quiescence(
     /* ---- 2.  stand-pat ---------------------------------------- */
     let stand_pat = color * pos.evaluate();
     if stand_pat >= beta {
-        ctx.tt.store(pos.zobrist(), 0, Bound::Lower, stand_pat, Move::null(), ctx.generation);
-        return Some((beta, Move::null()));          // fail-high
+        ctx.tt.store(
+            pos.zobrist(),
+            0,
+            Bound::Lower,
+            stand_pat,
+            Move::null(),
+            ctx.generation,
+        );
+        return Some((beta, Move::null())); // fail-high
     }
-    if stand_pat > alpha { alpha = stand_pat; }
+    if stand_pat > alpha {
+        alpha = stand_pat;
+    }
 
-    let in_check = pos.in_check();
-
+    /* ---- 3.  generate noisy moves ----------------------------- */
     let moves = all_moves(pos);
     let mut noisy = MoveList::new();
-
-    if in_check {
-        // When in check we must search *all* evasions.
-        noisy = moves;          // cheap copy; keeps original ordering
-    } else {
-        for m in moves.iter() {
-            if m.is_capture() || m.is_promotion() {   // just “noisy” stuff
-                noisy.push(m);
-            }
+    for m in moves.iter() {
+        if m.is_capture() || m.is_promotion() {
+            noisy.push(m);
         }
     }
-
     if noisy.is_empty() {
-        ctx.tt.store(pos.zobrist(), 0, Bound::Exact, stand_pat, Move::null(), ctx.generation);
+        ctx.tt.store(
+            pos.zobrist(),
+            0,
+            Bound::Exact,
+            stand_pat,
+            Move::null(),
+            ctx.generation,
+        );
         return Some((stand_pat, Move::null()));
     }
 
@@ -141,35 +141,34 @@ pub(crate) fn quiescence(
         pos.undo_move();
 
         let score = match child {
-            None          => return None,          // time-out bubbled
+            None => return None, // time-out bubbled
             Some((sc, _)) => -sc,
         };
 
         if score >= beta {
-            ctx.tt.store(pos.zobrist(), 0, Bound::Lower, score, m, ctx.generation);
-            return Some((beta, m));               // fail-high
+            ctx.tt
+                .store(pos.zobrist(), 0, Bound::Lower, score, m, ctx.generation);
+            return Some((beta, m)); // fail-high
         }
         if score > alpha {
-            alpha     = score;
+            alpha = score;
             best_move = m;
         }
     }
 
     /* ---- 6.  store in TT ------------------------------------- */
     let bound = if best_move.is_null() {
-        Bound::Exact              // stand-pat is the best
+        Bound::Exact // stand-pat is the best
     } else {
-        Bound::Upper              // searched moves but didn’t reach beta
+        Bound::Upper // searched moves but didn’t reach beta
     };
-    ctx.tt.store(pos.zobrist(), 0, bound, alpha, best_move, ctx.generation);
+    ctx.tt
+        .store(pos.zobrist(), 0, bound, alpha, best_move, ctx.generation);
 
     Some((alpha, best_move))
 }
 
-
-
 const MATE_SCORE: i16 = 10_000; // any value ≫ evaluate range
-
 
 pub(crate) fn negamax(
     pos: &mut Position,
@@ -185,26 +184,23 @@ pub(crate) fn negamax(
         return None; // bubble up timeout
     }
 
-
-
     // Only treat draw states *inside* the tree, not at root
     if ctx.ply > 0 {
         if pos.half_move() >= 100 || pos.is_repeat_towards_three_fold_repetition() {
             return Some((0, Move::null()));
         }
 
-
         // ─── Null-move pruning ─────────────────────────────────────────────
         if depth >= 3 && !pos.in_check() {
-            let r = if depth > 6 { 3 } else { 2 };  // dynamic reduction
+            let r = if depth > 6 { 3 } else { 2 }; // dynamic reduction
             pos.do_null_move();
 
             ctx.ply += 1;
             let child = negamax(
                 pos,
-                depth - 1 - r,     // depth reduction
+                depth - 1 - r, // depth reduction
                 -beta,
-                -beta + 1,         // “zero-window” re-search
+                -beta + 1, // “zero-window” re-search
                 -color,
                 deadline,
                 ctx,
@@ -214,14 +210,13 @@ pub(crate) fn negamax(
 
             let score = match child {
                 Some((s, _)) => -s,
-                None         => return None,
+                None => return None,
             };
 
             if score >= beta {
-                return Some((beta, Move::null()));   // fail-high — prune
+                return Some((beta, Move::null())); // fail-high — prune
             }
         }
-
     }
 
     let orig_alpha = alpha;
@@ -249,7 +244,6 @@ pub(crate) fn negamax(
         return quiescence(pos, alpha, beta, color, deadline, ctx);
     }
 
-
     /* ----- 3. generate moves & check terminal positions ----------- */
     let mut moves = all_moves(pos);
     if moves.is_empty() {
@@ -260,11 +254,8 @@ pub(crate) fn negamax(
         return Some((color * s, Move::null()));
     }
 
-
-
     /* -- 3a. PV move to front -------------------------------------- */
     order_moves(pos, &mut moves, ctx.pv_array[ctx.pv_index], hash_move);
-
 
     /* ----- 4. prepare PV bookkeeping ----------------------------- */
     ctx.pv_array[ctx.pv_index] = Move::null();
@@ -274,7 +265,6 @@ pub(crate) fn negamax(
     let mut best_move = Move::null();
     let mut best_score = i16::MIN + 1;
 
-
     for m in moves.iter() {
         pos.do_move(m);
 
@@ -283,15 +273,7 @@ pub(crate) fn negamax(
         ctx.pv_index = pv_next_index;
         ctx.ply += 1;
 
-        let child = negamax(
-            pos,
-            depth - 1,
-            -beta,
-            -alpha,
-            -color,
-            deadline,
-            ctx,
-        );
+        let child = negamax(pos, depth - 1, -beta, -alpha, -color, deadline, ctx);
 
         ctx.ply -= 1;
         ctx.pv_index = parent_pv_index;

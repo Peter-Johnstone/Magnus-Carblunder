@@ -1,5 +1,11 @@
 
 pub(crate) const FILE_A: u64 = 0x0101_0101_0101_0101;
+pub (crate) const FILE_B: u64 = 0x0202_0202_0202_0202;
+pub (crate) const FILE_C: u64 = 0x0404_0404_0404_0404;
+pub (crate) const FILE_D: u64 = 0x0808_0808_0808_0808;
+pub (crate) const FILE_E: u64 = 0x1010_1010_1010_1010;
+pub (crate) const FILE_F: u64 = 0x2020_2020_2020_2020;
+pub (crate) const FILE_G: u64 = 0x4040_4040_4040_4040;
 pub(crate) const FILE_H: u64 = 0x8080_8080_8080_8080;
 pub(crate) const RANK_1: u64 = 0x0000_0000_0000_00FF;
 pub(crate) const RANK_3: u64 = 0x0000_0000_00FF_0000;

@@ -3,11 +3,47 @@ use std::fmt;
 use rand::Rng;
 use crate::piece::Piece;
 use crate::position;
+use macroquad::audio::{load_sound, play_sound, PlaySoundParams, Sound};
+use std::sync::OnceLock;
+
+
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[derive(Debug)]
 pub struct Move(u16);
+
+
+
+static CAPTURE_SOUND: OnceLock<Sound> = OnceLock::new();
+static QUIET_SOUND:   OnceLock<Sound> = OnceLock::new();
+static CHECK_SOUND:   OnceLock<Sound> = OnceLock::new();
+static CASTLE_SOUND:   OnceLock<Sound> = OnceLock::new();
+static PROMOTE_SOUND:   OnceLock<Sound> = OnceLock::new();
+
+
+
+
+
+pub async fn init_sounds() {
+    CAPTURE_SOUND
+        .set(load_sound("res/capture.wav").await.unwrap())
+        .expect("CAPTURE_SOUND already initialised");
+    QUIET_SOUND
+        .set(load_sound("res/quiet.wav").await.unwrap())
+        .expect("QUIET_SOUND already initialised");
+    CHECK_SOUND
+        .set(load_sound("res/check.wav").await.unwrap())
+        .expect("CHECK_SOUND already initialised");
+    CASTLE_SOUND
+        .set(load_sound("res/castle.wav").await.unwrap())
+        .expect("CASTLE_SOUND already initialised");
+    PROMOTE_SOUND
+        .set(load_sound("res/promote.wav").await.unwrap())
+        .expect("PROMOTE_SOUND already initialised");
+
+}
+
 
 pub mod flag {
     pub const QUIET:                u16 = 0;
@@ -78,6 +114,29 @@ impl Move {
         Move::encode(from_sq, to_sq, flag_val)
     }
 
+    pub fn play_move_sound(&self, in_check: bool) {
+        let is_capture = self.is_capture() || self.is_en_passant();
+        
+        let sound = if is_capture {
+            CAPTURE_SOUND.get()
+        } else if self.is_king_castle() || self.is_queen_castle() {
+            CASTLE_SOUND.get()
+        } else if in_check {
+            CHECK_SOUND.get()
+        } else if self.is_promotion() {
+            PROMOTE_SOUND.get()
+        } else {
+            QUIET_SOUND.get()
+        };
+
+        if let Some(s) = sound {            // `Sound` is `Copy`
+            play_sound(&s, PlaySoundParams {
+                looped: false,
+                volume: 0.8,
+            });
+        }
+    }
+
     pub fn is_null(&self) -> bool {
         self.0 == 0
     }
@@ -96,7 +155,6 @@ impl Move {
     pub(crate) fn flag(&self) -> u16 {
         (self.0 & FLAG_MASK) >> FLAG_SHIFT
     }
-
 
     #[inline(always)]
     pub fn promotion_piece(self) -> Piece {
@@ -259,6 +317,17 @@ impl MoveList {
     }
 
     #[inline(always)]
+    /// NOT CHECKED!!! Make sure mv.is_null() is false!
+    pub (crate) fn index(&self, search_mv: Move) -> usize {
+        for (i, mv) in self.moves.iter().enumerate() {
+            if *mv == search_mv {
+                return i;
+            }
+        }
+        255
+    }
+
+    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -289,9 +358,9 @@ impl MoveList {
     #[inline(always)]
     pub fn moves_from_square(&self, square: u8) -> MoveList {
         let mut square_moves = MoveList::new();
-        for mov in self.moves {
+        for mov in self.moves[..self.len].iter() {
             if mov.from() == square {
-                square_moves.push(mov);
+                square_moves.push(*mov);
             }
         }
         square_moves

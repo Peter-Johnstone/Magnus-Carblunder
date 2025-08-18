@@ -9,6 +9,10 @@ use crate::position::{Position, Status};
 
 
 
+
+
+
+
 pub const PIECE_VALUE: [i16; 6] = [100, 320, 330, 500, 900, 0];
 
 #[inline(always)]

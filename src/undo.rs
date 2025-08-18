@@ -32,7 +32,6 @@ pub struct UndoStack {
 impl UndoStack {
     #[inline(always)]
     pub const fn new() -> Self {
-        // SAFETY: all‑zero bit‑pattern is valid for `Undo` (all fields Copy)
         const ZERO_UNDO: Undo = Undo {
             captured_piece: EMPTY_PIECE,
             captured_square: NO_SQ,
@@ -79,11 +78,20 @@ impl UndoStack {
         self.len -= 1;
         // SAFETY: we just decremented len, so index is in‑bounds.
         unsafe { *self.data.get_unchecked(self.len as usize) }
-
     }
     #[inline(always)]
     pub fn peek_index(&self, index: usize) -> Undo {
         self.data[index]
+    }
+
+    #[inline(always)]
+    pub fn is_near_full(&self) -> bool {
+        self.len > 200
+    }
+
+    #[inline(always)]
+    pub fn make_space(&mut self) {
+        self.len = 0;
     }
 
     /// Removes and returns the first `Undo` (the bottom of the stack),

@@ -1,16 +1,19 @@
 use std::cmp::PartialEq;
 use std::fmt;
 use std::time::{Duration, Instant};
+use crate::attacks::movegen::all_moves;
 use crate::color::Color;
 use crate::engines::constants::MAX_DEPTH;
-use crate::engines::engine_manager::Eval::{Basic, PSTKingEgBonus, PST};
-use crate::engines::engine_manager::Search::{AlphaBeta, Minimax, Random, WithCheckInQuiescenceSearch, WithHashMoveOrdering, WithMVVLVAMoveOrdering, WithNullMovePruning, WithQuiescenceSearch, WithRootPVOrdering, WithTranspositionTable};
-use crate::engines::evaluate::{e1, e2, e3};
-use crate::engines::search::{s1, s10, s2, s3, s4, s5, s6, s7, s8, s9};
+use crate::engines::engine_manager::Eval::{Basic, WithTradingBonus};
+use crate::engines::engine_manager::Search::{AlphaBeta, Minimax, Random, CaptureLastPieceMO, WithHashMoveOrdering, WithMVVLVAMoveOrdering, WithNullMovePruning, WithQuiescenceSearch, WithRootPVOrdering, WithTranspositionTable, WithHistoryHeuristic, WithKillerMoves, WithLMR, WithInCheckQuiescence, Simplified1, Simplified2, Simplified3, Testing, Simplified4, Simplified5, Simplified6};
+use crate::engines::evaluate::{e1, e2};
+use crate::engines::search::{s1, s10, s11, s12, s13, s14, s2, s3, s4, s5, s6, s7, s8, s9, simplified1, simplified2, simplified3, simplified4, simplified5, simplified6, testing_only};
 use crate::engines::transposition_table::TransTable;
 use crate::mov::Move;
 use crate::position::Position;
-
+use crate::engines::history::History;
+use crate::engines::pv::PV;
+use crate::engines::stats::Stats;
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum Search {
@@ -23,19 +26,33 @@ pub enum Search {
     WithMVVLVAMoveOrdering, // uses most-valuable victim least-valuable aggressor move ordering
     WithQuiescenceSearch, // Searches until it reaches quiet positions
     WithNullMovePruning, // Incorporates null move pruning into the search
-    WithCheckInQuiescenceSearch, // adds check positions to quiescence search
+    CaptureLastPieceMO, // adds a bonus to try capturing the last moved piece
+    WithHistoryHeuristic, // Shrinks the scored move metric from i32 to u8
+    WithKillerMoves, // Implement killers
+    WithLMR, // Implements late move reductions
+    WithInCheckQuiescence, // Implements the quiescence search for positions where we are in check
+
+    Simplified1,
+    Simplified2,
+    Simplified3,
+    Simplified4,
+    Simplified5,
+    Simplified6,
+
+
+    Testing,
+
 }
 
-pub const NUMBER_OF_SEARCH_ALGORITHMS: u8 = 10;
+pub const NUMBER_OF_SEARCH_ALGORITHMS: u8 = 20;
 #[derive(Copy, Clone)]
 #[derive(Debug)]
 pub enum Eval {
-    Basic, // Just pieces
-    PST, // PST
-    PSTKingEgBonus, // PST and endgame king bonus
+    Basic,
+    WithTradingBonus, // awards trading in winning positions, punishes in losing positions.
 }
 
-pub const NUMBER_OF_EVAL_ALGORITHMS: u8 = 3;
+pub const NUMBER_OF_EVAL_ALGORITHMS: u8 = 2;
 
 impl TryFrom<u8> for Search {
     type Error = ();
@@ -50,7 +67,19 @@ impl TryFrom<u8> for Search {
             7  => Ok(WithMVVLVAMoveOrdering),
             8  => Ok(WithQuiescenceSearch),
             9  => Ok(WithNullMovePruning),
-            10 => Ok(WithCheckInQuiescenceSearch),
+            10 => Ok(CaptureLastPieceMO),
+            11 => Ok(WithHistoryHeuristic),
+            12 => Ok(WithKillerMoves),
+            13 => Ok(WithLMR),
+            14 => Ok(WithInCheckQuiescence),
+            15 => Ok(Simplified1),
+            16 => Ok(Simplified2),
+            17 => Ok(Simplified3),
+            18 => Ok(Simplified4),
+            19 => Ok(Simplified5),
+            20 => Ok(Simplified6),
+
+            30 => Ok(Testing),
             _ => Err(()),
         }
     }
@@ -61,8 +90,7 @@ impl TryFrom<u8> for Eval {
     fn try_from(x: u8) -> Result<Self, ()> {
         match x {
             1 => Ok(Basic),
-            2 => Ok(PST),
-            3 => Ok(PSTKingEgBonus),
+            2 => Ok(WithTradingBonus),
             _ => Err(()),
         }
     }
@@ -73,23 +101,18 @@ const PV_ARRAY_LENGTH: usize = ((MAX_DEPTH*MAX_DEPTH + MAX_DEPTH)/2) as usize; /
 
 
 pub struct Ctx {
-    pub tt:           TransTable,
-    pub eval_fn: fn(&Position) -> i16,
-
+    pub tt:             TransTable,
+    pub eval_fn:        fn(&Position) -> i16,
     pub nodes:          u64,
-    pub hash_first:     u64,
-    pub hash_miss:      u64,
     pub total_nodes:    u64,
-    pub tt_probes:      u64,
-    pub tt_hits:        u64,
-    pub ply:            u16,
     pub generation:     u16,
+    pub ply:            u16,
     pub pv_index:       usize,
-    pub tt_played:      u64,
-    pub tt_played_cut:  u64,
-    pub pv_played_cut:  u64,
-    pub pv_played:      u64,
-    pub pv_array:     [Move; PV_ARRAY_LENGTH],
+    pub pv_array:       [Move; PV_ARRAY_LENGTH],
+    pub pv:             PV,
+    pub stats:          Stats,
+    pub history:        History,
+    pub killers:        [[Move; 2]; MAX_DEPTH as usize],
 }
 
 impl Ctx {
@@ -98,19 +121,15 @@ impl Ctx {
             tt:             TransTable::new(128),
             eval_fn,
             nodes:          0,
-            hash_first:     0,
-            hash_miss:      0,
             total_nodes:    0,
-            tt_probes:      0,
-            tt_hits:        0,
             ply:            0,
             generation:     0,
             pv_index:       0,
-            tt_played:      0,
-            tt_played_cut:  0,
-            pv_played_cut:  0,
-            pv_played:      0,
             pv_array:       [Move::null(); PV_ARRAY_LENGTH],
+            pv:             PV::new(),
+            stats:          Stats::default(),
+            history:        Default::default(),
+            killers:        [[Move::null(); 2]; MAX_DEPTH as usize],
         }
     }
 }
@@ -154,8 +173,7 @@ impl Engine {
     fn eval_fn(eval: Eval) -> fn(&Position) -> i16 {
         match eval {
             Basic => e1::evaluate,
-            PST => e2::evaluate,
-            PSTKingEgBonus => e3::evaluate
+            WithTradingBonus => e2::evaluate,
         }
     }
 
@@ -170,7 +188,21 @@ impl Engine {
             WithMVVLVAMoveOrdering => s7::negamax,
             WithQuiescenceSearch => s8::negamax,
             WithNullMovePruning => s9::negamax,
-            WithCheckInQuiescenceSearch => s10::negamax,
+            CaptureLastPieceMO => s10::negamax,
+            WithHistoryHeuristic => s11::negamax,
+            WithKillerMoves => s12::negamax,
+            WithLMR => s13::negamax,
+            WithInCheckQuiescence => s14::negamax,
+
+            Simplified1 => simplified1::minimax,
+            Simplified2 => simplified2::minimax,
+            Simplified3 => simplified3::minimax,
+            Simplified4 => simplified4::minimax,
+            Simplified5 => simplified5::minimax,
+            Simplified6 => simplified6::minimax,
+
+            Testing => testing_only::minimax,
+
         }
     }
 
@@ -178,46 +210,49 @@ impl Engine {
         self.search_ctx.total_nodes
     }
 
-
-
+    pub fn set_time_limit(&mut self, ms: u64) {
+        self.time_ms = ms;
+    }
 
     pub fn pick_and_stats(&mut self, pos: &mut Position) -> (Move, u8, i16) {
         // ───────────────────────────────────────────────────────────────
         // (0) fresh bookkeeping for this whole search
         // ───────────────────────────────────────────────────────────────
-        {
-            let ctx = &mut self.search_ctx;
 
+        if pos.undo_stack.is_near_full() {
+            pos.undo_stack.make_space();
+        }
+        let ctx = &mut self.search_ctx;
+        {
+            ctx.history.clear();   // reset history to 0s
             ctx.generation = ctx.generation.wrapping_add(1);
             ctx.total_nodes += ctx.nodes;
-            ctx.nodes           = 0;
-            ctx.hash_first      = 0;
-            ctx.tt_probes       = 0;
-            ctx.tt_hits         = 0;
-            ctx.tt_played       = 0;
-            ctx.tt_played_cut   = 0;
-            ctx.pv_played       = 0;
-            ctx.pv_played_cut   = 0;
-
+            ctx.nodes     = 0;
             ctx.pv_index  = 0;
             ctx.ply       = 0;
-            ctx.pv_array[0] = Move::null();          // blank root row
-        }   // mutable borrow ends here
+            ctx.stats     = Stats::default();
+            ctx.pv_array[0] = Move::null();
+            ctx.killers.iter_mut().for_each(|slot| *slot = [Move::null(); 2]);
+        }
 
-        // ───────────────────────────────────────────────────────────────
-        // (1) iterative deepening
-        // ───────────────────────────────────────────────────────────────
         let deadline = Instant::now() + Duration::from_millis(self.time_ms);
-        let color    = if pos.turn() == Color::White { 1 } else { -1 };
+        let color    = if pos.side_to_move() == Color::White { 1 } else { -1 };
 
         let mut best_eval = i16::MIN;
-        let mut best  = Move::null();
-        let mut depth = 1_u8;
+        let mut best      = Move::null();
+        let mut depth     = 1u8;
 
         while Instant::now() < deadline {
-            // -------- call the search (mutable borrow inside this block)
+            // ----- 1a. run search (mutable borrow inside this block)
+
+            ctx.stats     = Stats::default();
+            ctx.pv_index  = 0;
+            ctx.ply       = 0;
+            ctx.pv_array[0] = Move::null();
+            ctx.pv.clear_node(ctx.ply);
+            ctx.killers.iter_mut().for_each(|slot| *slot = [Move::null(); 2]);
+
             let search_result = {
-                let ctx = &mut self.search_ctx;      // short-lived &mut self
                 (self.search_fn)(
                     pos,
                     depth,
@@ -227,41 +262,47 @@ impl Engine {
                     deadline,
                     ctx,
                 )
-            };  // ctx borrow ends here
+            }; // ctx borrow ends here
 
-            // -------- handle the result (immutable borrow now allowed)
+            // ----- 1b. handle result  (now we can borrow ctx immutably)
             match search_result {
                 Some((eval, mv)) if !mv.is_null() => {
-                    best = mv;                       //  ← store best move
+                    best      = mv;
                     best_eval = eval;
+                    //ctx.stats.print();
 
-                    // print!("Depth {depth}: ");
-                    // self.print_pv(depth);                 //  ← prints current PV
-                    // eprintln!(
-                    //     "Engine #{:?}, TT played: {:.0}%, cuts: {:.0}%, PV played {:.0}%, cuts {:.0}%",
-                    //     self.search,
-                    //
-                    //     100.0 * ctx.tt_played as f64 / nodes,
-                    //     percent(ctx.tt_played_cut, ctx.tt_played),
-                    //     100.0 * ctx.pv_played as f64 / nodes,
-                    //     percent(ctx.pv_played_cut, ctx.pv_played),
-                    // );
-
-
-                    // prepare for next iteration
-                    if depth == (MAX_DEPTH-2) as u8 { break; }
+                    // prepare next iteration
+                    if depth >= (MAX_DEPTH - 2) as u8 || Instant::now() >= deadline {
+                        break;
+                    }
                     depth = depth.saturating_add(1);
 
-                    let ctx = &mut self.search_ctx;  // new short-lived borrow
-                    ctx.pv_index   = 0;
-                    ctx.ply        = 0;
+                    // reset root-level bookkeeping
+                    ctx.pv_index = 0;
+                    ctx.ply      = 0;
                 }
-                _ => break,                          // timeout or no legal move
+                _ => break, // timeout or search returned no legal move
             }
+        }
+
+        if best.is_null() {
+            best = all_moves(pos).get(0);
         }
 
         // depth now points one past the last *completed* ply
         (best, depth.saturating_sub(1), best_eval)
+    }
+
+    pub fn clone(&self) -> Engine {
+        let eval_fn   = Self::eval_fn  (self.eval);
+        let ctx = Ctx::new(eval_fn);
+        Engine {
+            search: self.search,
+            eval: self.eval,
+            search_fn: self.search_fn,
+            search_ctx: ctx,
+            time_ms: self.time_ms,
+        }
     }
 
 
@@ -283,25 +324,28 @@ impl Engine {
     }
 
 
+
     pub fn pick_fixed_depth(&mut self, pos: &mut Position, depth: u8) -> Move {
+        // ───────────────────────────────────────────────────────────────
+        // (0) fresh bookkeeping for this whole search
+        // ───────────────────────────────────────────────────────────────
         let ctx = &mut self.search_ctx;
-        ctx.generation = ctx.generation.wrapping_add(1);
-        ctx.total_nodes += ctx.nodes;
-        ctx.nodes = 0;
-        ctx.hash_first = 0;
-        ctx.tt_probes = 0;
-        ctx.tt_hits   = 0;
+        {
+            ctx.history.clear(); // reset history to 0
+            ctx.generation = ctx.generation.wrapping_add(1);
+            ctx.total_nodes += ctx.nodes;
+            ctx.nodes     = 0;
+            ctx.pv_index  = 0;
+            ctx.ply       = 0;
+            ctx.pv_array[0] = Move::null();
+            ctx.pv.clear_node(ctx.ply);
 
-        /* 1. 100 % critical: reset PV position counters */
-        ctx.pv_index = 0;    // root always starts at cell 0
-        ctx.ply      = 0;    // root is ply 0
-
-        /* optional: blank the first row for clean diagnostics */
-        ctx.pv_array[0] = Move::null();
+            ctx.killers.iter_mut().for_each(|slot| *slot = [Move::null(); 2]);
+        }
 
         const FAR_FUTURE_SECS: u64 = 1000 * 365 * 24 * 60 * 60; // ~1000 years
         let deadline = Instant::now() + Duration::from_secs(FAR_FUTURE_SECS); //no deadline
-        let color    = if pos.turn() == Color::White { 1 } else { -1 };
+        let color    = if pos.side_to_move() == Color::White { 1 } else { -1 };
 
         if let Some(search_result) = {
             (self.search_fn)(
@@ -320,24 +364,29 @@ impl Engine {
     }
 
     pub fn nodes_searched(&mut self, pos: &mut Position, depth: u8) -> u64 {
+        // ───────────────────────────────────────────────────────────────
+        // (0) fresh bookkeeping for this whole search
+        // ───────────────────────────────────────────────────────────────
+        if pos.undo_stack.is_near_full() {
+            pos.undo_stack.make_space();
+        }
         let ctx = &mut self.search_ctx;
-        ctx.generation = ctx.generation.wrapping_add(1);
-        ctx.total_nodes += ctx.nodes;
-        ctx.nodes = 0;
-        ctx.hash_first = 0;
-        ctx.tt_probes = 0;
-        ctx.tt_hits   = 0;
+        {
+            ctx.history.clear();   // reset history to 0s
+            ctx.generation = ctx.generation.wrapping_add(1);
+            ctx.total_nodes += ctx.nodes;
+            ctx.nodes     = 0;
+            ctx.pv_index  = 0;
+            ctx.ply       = 0;
+            ctx.pv_array[0] = Move::null();
+            ctx.pv.clear_node(ctx.ply);
 
-        /* 1. 100 % critical: reset PV position counters */
-        ctx.pv_index = 0;    // root always starts at cell 0
-        ctx.ply      = 0;    // root is ply 0
-
-        /* optional: blank the first row for clean diagnostics */
-        ctx.pv_array[0] = Move::null();
+            ctx.killers.iter_mut().for_each(|slot| *slot = [Move::null(); 2]);
+        }
 
         const FAR_FUTURE_SECS: u64 = 1000 * 365 * 24 * 60 * 60; // ~1000 years
         let deadline = Instant::now() + Duration::from_secs(FAR_FUTURE_SECS); //no deadline
-        let color    = if pos.turn() == Color::White { 1 } else { -1 };
+        let color    = if pos.side_to_move() == Color::White { 1 } else { -1 };
 
         (self.search_fn)(
             pos,

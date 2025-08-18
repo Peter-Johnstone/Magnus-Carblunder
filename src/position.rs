@@ -3,13 +3,16 @@
 use std::str::SplitWhitespace;
 use crate::attacks::movegen::{all_moves};
 use crate::attacks::sliding::{diagonal_attacks, orthogonal_attacks};
+use crate::bitboards::{FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H};
 use crate::castling_rights::{CastlingRights, CASTLE_RIGHT_MASK, ROOK_END_FROM_KING_TO, ROOK_START_FROM_KING_TO};
 use crate::color::Color;
+use crate::color::Color::{Black, White};
 use crate::tables::{zobrist, KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS, RAYS};
 use crate::mov::{en_passant_capture_pawn, flag, index_to_algebraic, is_flag_capture_promo, is_flag_quiet_promo, new_en_passant_square, Move};
 use crate::direction::Dir;
-use crate::eval::{build_eval, mirror, EvalCache, PHASE_INC, PIECE_VALUE, PST_EG, PST_MG};
+use crate::eval::{build_eval, mirror, EvalCache, EG_VALUE, MG_VALUE, PHASE_INC, PST_EG, PST_MG};
 use crate::piece::{is_empty, is_slider_val, piece_to_val, to_color, to_piece, to_str, ColoredPiece, Piece, EMPTY_PIECE};
+use crate::position::Status::{Checkmate, Draw, Ongoing};
 pub(crate) use crate::state_info::StateInfo;
 use crate::undo::{Undo, UndoStack};
 
@@ -209,18 +212,18 @@ impl Position {
         let color   = to_color(colored);
         let flag    = mov.flag();
 
-        /* ─── NEW: incremental‑eval deltas initialisation ─────────── */
+        /* ─── NEW: incremental-eval deltas initialisation ─────────── */
         let mut d_mg    = 0i32;
         let mut d_eg    = 0i32;
         let mut d_phase = 0i32;
         let sgn    = if color.is_white() { 1 } else { -1 };
-        let from_i = if color.is_white() { from } else { mirror(from) };
-        let to_i   = if color.is_white() { to   } else { mirror(to)   };
+        let from_i = if color.is_white() { mirror(from)  } else { from };
+        let to_i   = if color.is_white() { mirror(to)   } else { to   };
         let p_idx  = piece as usize;
 
         // Moving piece leaves its square: remove its contribution from eval & phase
-        d_mg    -= sgn * (PST_MG[p_idx][from_i] + PIECE_VALUE[p_idx]) as i32;
-        d_eg    -= sgn * (PST_EG[p_idx][from_i] + PIECE_VALUE[p_idx]) as i32;
+        d_mg    -= sgn * (PST_MG[p_idx][from_i] + MG_VALUE[p_idx]) as i32;
+        d_eg    -= sgn * (PST_EG[p_idx][from_i] + EG_VALUE[p_idx]) as i32;
         d_phase -= PHASE_INC[p_idx];
         /* ─────────────────────────────────────────────────────────── */
 
@@ -241,11 +244,11 @@ impl Position {
                 let captured_color  = to_color(captured_piece);
                 let csgn            = if captured_color.is_white() { 1 } else { -1 };
                 let cap_sq          = captured_square as usize;
-                let cap_i           = if captured_color.is_white() { cap_sq } else { mirror(cap_sq) };
+                let cap_i           = if captured_color.is_white() { mirror(cap_sq) } else { cap_sq };
 
                 // Removing a piece means subtracting its contribution from the eval & phase
-                d_mg    -= csgn * (PST_MG[cp][cap_i] + PIECE_VALUE[cp]) as i32;
-                d_eg    -= csgn * (PST_EG[cp][cap_i] + PIECE_VALUE[cp]) as i32;
+                d_mg    -= csgn * (PST_MG[cp][cap_i] + MG_VALUE[cp]) as i32;
+                d_eg    -= csgn * (PST_EG[cp][cap_i] + EG_VALUE[cp]) as i32;
                 d_phase -= PHASE_INC[cp];
             }
         }
@@ -297,8 +300,8 @@ impl Position {
             self.move_piece(piece,        color, from,   to);
             self.move_piece(Piece::Rook,  color, r_from, r_to);
 
-            let r_from_i = if color.is_white() { r_from } else { mirror(r_from) };
-            let r_to_i   = if color.is_white() { r_to   } else { mirror(r_to)   };
+            let r_from_i = if color.is_white() { mirror(r_from) } else { r_from };
+            let r_to_i   = if color.is_white() { mirror(r_to)   } else { r_to   };
             let rp = Piece::Rook as usize;
 
             d_mg -= sgn * PST_MG[rp][r_from_i] as i32;
@@ -310,19 +313,9 @@ impl Position {
             self.move_piece(piece, color, from, to);
             self.promote_to(mov.promotion_piece(), to, color);
 
-            let np = mov.promotion_piece() as usize;
-            d_mg += sgn * (PST_MG[np][to_i] + PIECE_VALUE[np] - PIECE_VALUE[Piece::Pawn as usize]) as i32;
-            d_eg += sgn * (PST_EG[np][to_i] + PIECE_VALUE[np] - PIECE_VALUE[Piece::Pawn as usize]) as i32;
-            d_phase += PHASE_INC[np];
-
         } else if is_flag_capture_promo(flag) {
             self.capture_and_move_piece(piece, color, from, to);
             self.promote_to(mov.promotion_piece(), to, color);
-
-            let np = mov.promotion_piece() as usize;
-            d_mg += sgn * (PST_MG[np][to_i] + PIECE_VALUE[np] - PIECE_VALUE[Piece::Pawn as usize]) as i32;
-            d_eg += sgn * (PST_EG[np][to_i] + PIECE_VALUE[np] - PIECE_VALUE[Piece::Pawn as usize]) as i32;
-            d_phase += PHASE_INC[np];
 
         } else if flag == flag::EN_PASSANT {
             self.remove_piece(captured_square as usize);
@@ -332,10 +325,16 @@ impl Position {
             unreachable!();
         }
 
-        /* 6. add moving piece on TO --------------------------------- */
-        d_mg += sgn * (PST_MG[p_idx][to_i] + PIECE_VALUE[p_idx]) as i32;
-        d_eg += sgn * (PST_EG[p_idx][to_i] + PIECE_VALUE[p_idx]) as i32;
-        d_phase += PHASE_INC[p_idx];
+        /* 6. add piece on TO (final piece after promotions) ---------- */
+        let to_piece_idx = if is_flag_quiet_promo(flag) || is_flag_capture_promo(flag) {
+            mov.promotion_piece() as usize
+        } else {
+            p_idx
+        };
+
+        d_mg += sgn * (PST_MG[to_piece_idx][to_i] + MG_VALUE[to_piece_idx]) as i32;
+        d_eg += sgn * (PST_EG[to_piece_idx][to_i] + EG_VALUE[to_piece_idx]) as i32;
+        d_phase += PHASE_INC[to_piece_idx];
 
         /* 7. update eval cache -------------------------------------- */
         self.eval.mg    += d_mg;
@@ -367,13 +366,10 @@ impl Position {
             self.half_move + 1
         };
 
-
-
         /* 11. flip turn & hash ---------------------------------------- */
         self.zobrist ^= zobrist::TURN_IS_BLACK;
         self.turn = !self.turn;
         self.state_info = self.compute_pins_checks(self.turn);
-
     }
 
 
@@ -522,6 +518,11 @@ impl Position {
             piece, color, from
         );
 
+        if count == 255 {
+            self.print_move_history();
+            self.print_board();
+        }
+
         // 3. Update piece list
         self.piece_list[p][c][count] = to as u8;
 
@@ -566,13 +567,12 @@ impl Position {
         self.reverse_piece_index[new_p][new_c][sq]       = idx_new as u8;
         self.piece_count[new_p][new_c]                  += 1;
 
-        self.zobrist ^= zobrist::PIECE_SQUARES[sq][new_p][new_p];
+        self.zobrist ^= zobrist::PIECE_SQUARES[sq][new_p][new_c];
 
         self.board[sq] = piece_to_val(new_piece, new_color);
         self.bitboards[new_c][new_p] ^= bb_sq;   // set bit
         self.occupancy[new_c]        ^= bb_sq;
     }
-
 
     #[inline(always)]
     fn add_piece(&mut self, new_piece: ColoredPiece, sq: u8) {
@@ -622,7 +622,223 @@ impl Position {
 
     #[inline(always)]
     pub fn evaluate(&self) -> i16 {
-        self.eval.tapered()
+        // self.eval.{mg,eg} are already White−Black totals
+        let mut mg_phase = self.eval.phase;
+        if mg_phase > 24 { mg_phase = 24; }
+        if mg_phase < 0  { mg_phase = 0; }
+
+        let eg_phase = 24 - mg_phase;
+
+        ((self.eval.mg * mg_phase + self.eval.eg * eg_phase) / 24) as i16
+    }
+
+    #[inline(always)]
+    pub fn evaluate_2(&self) -> i16 {
+        // Clamp phase
+        let mut mg_phase = self.eval.phase;
+        if mg_phase > 24 { mg_phase = 24; }
+        if mg_phase < 0  { mg_phase = 0; }
+        let eg_phase = 24 - mg_phase;
+
+        // --- simplification bias ---
+        // 1) Get material lead in centipawns (White−Black). Prefer pure material, not full eval.
+        // If you already keep material separately, use that. Fallback: use a material() helper.
+        let material_lead_cp: i32 = self.raw_material_diff();
+
+        // 2) Count remaining non-pawn pieces (both sides). Start-of-game is 14 (7 per side).
+        let nonpawn_count: i32 = self.count_nonpawn_pieces_total();
+        const MAX_NONPAWN_START: i32 = 14;
+
+        // 3) How simplified are we? (0 at start, grows as pieces come off)
+        let simplified: i32 = (MAX_NONPAWN_START - nonpawn_count).max(0);
+
+        // 4) Tunable coefficients (in CP per piece of simplification).
+        //    Stronger in endgame, milder in middlegame.
+        const SIMPLIFY_MG: i32 = 2;  // cp per piece of simplification when ahead
+        const SIMPLIFY_EG: i32 = 6;  // cp per piece of simplification when ahead
+
+        // Bias sign follows the material lead:
+        //  - If material_lead_cp > 0 => bonus for simplification (trading).
+        //  - If material_lead_cp < 0 => penalty for simplification (discourage trades).
+        // Use sign only to avoid blowing up with big leads.
+        let lead_sign: i32 = material_lead_cp.signum();
+
+        let simplify_mg: i32 = lead_sign * SIMPLIFY_MG * simplified;
+        let simplify_eg: i32 = lead_sign * SIMPLIFY_EG * simplified;
+
+        // Blend your base eval and the simplification term with the usual tapered scheme
+        let blended_eval: i32 =
+            (self.eval.mg + simplify_mg) * mg_phase +
+                (self.eval.eg + simplify_eg) * eg_phase;
+
+        (blended_eval / 24) as i16
+    }
+
+    #[inline(always)]
+    pub fn evaluate_3(&self) -> i16 {
+        // Clamp phase
+        let mut mg_phase = self.eval.phase;
+        if mg_phase > 24 { mg_phase = 24; }
+        if mg_phase < 0  { mg_phase = 0; }
+        let eg_phase = 24 - mg_phase;
+
+        // --- simplification bias ---
+        // 1) Get material lead in centipawns (White−Black). Prefer pure material, not full eval.
+        // If you already keep material separately, use that. Fallback: use a material() helper.
+        let material_lead_cp: i32 = self.raw_material_diff();
+
+        // 2) Count remaining non-pawn pieces (both sides). Start-of-game is 14 (7 per side).
+        let nonpawn_count: i32 = self.count_nonpawn_pieces_total();
+        const MAX_NONPAWN_START: i32 = 14;
+
+        // 3) How simplified are we? (0 at start, grows as pieces come off)
+        let simplified: i32 = (MAX_NONPAWN_START - nonpawn_count).max(0);
+
+        // 4) Tunable coefficients (in CP per piece of simplification).
+        //    Stronger in endgame, milder in middlegame.
+        const SIMPLIFY_MG: i32 = 0;  // cp per piece of simplification when ahead
+        const SIMPLIFY_EG: i32 = 28;  // cp per piece of simplification when ahead
+
+        // Bias sign follows the material lead:
+        //  - If material_lead_cp > 0 => bonus for simplification (trading).
+        //  - If material_lead_cp < 0 => penalty for simplification (discourage trades).
+        // Use sign only to avoid blowing up with big leads.
+        let lead_sign: i32 = material_lead_cp.signum();
+
+        let simplify_mg: i32 = lead_sign * SIMPLIFY_MG * simplified;
+        let simplify_eg: i32 = lead_sign * SIMPLIFY_EG * simplified;
+
+        let wp = self.pawns(White);
+        let bp = self.pawns(Black);
+        let dp_white = doubled_pawns(wp);
+        let dp_black = doubled_pawns(bp);
+
+        const DP_MG: i32 = 30; // cp per extra pawn in a file (middlegame)
+        const DP_EG: i32 = 15;  // cp (endgame)
+
+        // Positive if Black has more doubles → increases White’s eval; negative if White has more → lowers eval.
+        let dp_mg: i32 = (dp_black - dp_white) * DP_MG;
+        let dp_eg: i32 = (dp_black - dp_white) * DP_EG;
+
+        // Blend
+        let blended_eval: i32 =
+            (self.eval.mg + simplify_mg + dp_mg) * mg_phase +
+                (self.eval.eg + simplify_eg + dp_eg) * eg_phase;
+
+        (blended_eval / 24) as i16
+    }
+
+
+    #[inline(always)]
+    pub fn evaluate_4(&self) -> i16 {
+        // Clamp phase
+        let mut mg_phase = self.eval.phase;
+        if mg_phase > 24 { mg_phase = 24; }
+        if mg_phase < 0  { mg_phase = 0; }
+        let eg_phase = 24 - mg_phase;
+
+        // --- simplification bias ---
+        // 1) Get material lead in centipawns (White−Black). Prefer pure material, not full eval.
+        // If you already keep material separately, use that. Fallback: use a material() helper.
+        let material_lead_cp: i32 = self.raw_material_diff();
+
+        // 2) Count remaining non-pawn pieces (both sides). Start-of-game is 14 (7 per side).
+        let nonpawn_count: i32 = self.count_nonpawn_pieces_total();
+        const MAX_NONPAWN_START: i32 = 14;
+
+        // 3) How simplified are we? (0 at start, grows as pieces come off)
+        let simplified: i32 = (MAX_NONPAWN_START - nonpawn_count).max(0);
+
+        // 4) Tunable coefficients (in CP per piece of simplification).
+        //    Stronger in endgame, milder in middlegame.
+        const SIMPLIFY_MG: i32 = 0;  // cp per piece of simplification when ahead
+        const SIMPLIFY_EG: i32 = 28;  // cp per piece of simplification when ahead
+
+        // Bias sign follows the material lead:
+        //  - If material_lead_cp > 0 => bonus for simplification (trading).
+        //  - If material_lead_cp < 0 => penalty for simplification (discourage trades).
+        // Use sign only to avoid blowing up with big leads.
+        let lead_sign: i32 = material_lead_cp.signum();
+
+        let simplify_mg: i32 = lead_sign * SIMPLIFY_MG * simplified;
+        let simplify_eg: i32 = lead_sign * SIMPLIFY_EG * simplified;
+
+        let wp = self.pawns(White);
+        let bp = self.pawns(Black);
+        let dp_white = doubled_pawns(wp);
+        let dp_black = doubled_pawns(bp);
+
+        const DP_MG: i32 = 30; // cp per extra pawn in a file (middlegame)
+        const DP_EG: i32 = 25;  // cp (endgame)
+
+        // Positive if Black has more doubles → increases White’s eval; negative if White has more → lowers eval.
+        let dp_mg: i32 = (dp_black - dp_white) * DP_MG;
+        let dp_eg: i32 = (dp_black - dp_white) * DP_EG;
+
+        // Blend
+        let blended_eval: i32 =
+            (self.eval.mg + simplify_mg + dp_mg) * mg_phase +
+                (self.eval.eg + simplify_eg + dp_eg) * eg_phase;
+
+        (blended_eval / 24) as i16
+    }
+
+
+    #[inline(always)]
+    pub fn captured_pieces(&self) -> [u8; 10] {
+        [
+            (8 - self.piece_count(Piece::Pawn, White)) as u8,
+            (2 - self.piece_count(Piece::Knight, White)) as u8,
+            (2 - self.piece_count(Piece::Bishop, White)) as u8,
+            (2 - self.piece_count(Piece::Rook, White)) as u8,
+            (1 - self.piece_count(Piece::Queen, White)) as u8,
+            (8 - self.piece_count(Piece::Pawn, Black)) as u8,
+            (2 - self.piece_count(Piece::Knight, Black)) as u8,
+            (2 - self.piece_count(Piece::Bishop, Black)) as u8,
+            (2 - self.piece_count(Piece::Rook, Black)) as u8,
+            (1 - self.piece_count(Piece::Queen, Black)) as u8,
+        ]
+    }
+
+
+    #[inline(always)]
+    pub fn game_result_eval(&self, depth: u8) -> i16 {
+        // Unchecked function to evaluate a finished chess game. Cannot be called on ongoing games.
+        let result = self.get_game_result();
+
+        match result {
+            Checkmate(White) =>  10000 + (depth as i16),
+            Checkmate(Black) => -10000 - (depth as i16),
+            Draw             =>  0,
+            Ongoing          =>  !unreachable!(),
+        }
+    }
+
+    fn raw_material_diff(&self) -> i32 {
+        const VALUES: [i32; 6] = [  100, 320, 330, 500, 900,   0];
+
+        VALUES[0] * self.piece_count(Piece::Pawn, White)
+            + VALUES[1] * self.piece_count(Piece::Knight, White)
+            + VALUES[2] * self.piece_count(Piece::Bishop, White)
+            + VALUES[3] * self.piece_count(Piece::Rook, White)
+            + VALUES[4] * self.piece_count(Piece::Queen, White)
+
+            - VALUES[0] * self.piece_count(Piece::Pawn, Black)
+            - VALUES[1] * self.piece_count(Piece::Knight, Black)
+            - VALUES[2] * self.piece_count(Piece::Bishop, Black)
+            - VALUES[3] * self.piece_count(Piece::Rook, Black)
+            - VALUES[4] * self.piece_count(Piece::Queen, Black)
+    }
+
+    fn count_nonpawn_pieces_total(&self) -> i32 {
+        self.piece_count(Piece::Knight, Black) +
+            self.piece_count(Piece::Bishop, Black) +
+            self.piece_count(Piece::Rook, Black) +
+            self.piece_count(Piece::Queen, Black) +
+            self.piece_count(Piece::Knight, White) +
+            self.piece_count(Piece::Bishop, White) +
+            self.piece_count(Piece::Rook, White) +
+            self.piece_count(Piece::Queen, White)
     }
 
     #[inline(always)]
@@ -654,6 +870,41 @@ impl Position {
         false
     }
 
+    /// Return `true` if the current side-to-move position
+    /// has already occurred **twice** before in the 50-move window,
+    /// i.e. this occurrence would make it a *threefold repetition*.
+    #[inline(always)]
+    pub fn is_three_fold_repetition(&self) -> bool {
+        // Current Zobrist key
+        let key = self.zobrist;
+
+        // No chance if fewer than 8 reversible plies have passed
+        // (you need at least two prior same-side positions).
+        if self.half_move < 8 {
+            return false;
+        }
+
+        let mut count     = 0;
+        let mut remaining = self.half_move as i32 - 2;      // reversible plies left
+        let mut idx       = self.undo_stack.len as i32 - 2; // last same-side position
+
+        // Step back two plies at a time (same side to move)
+        while remaining >= 0 && idx >= 0 {
+            if self.undo_stack.peek_index(idx as usize).zobrist == key {
+                count += 1;
+                if count >= 2 {
+                    return true; // found two earlier identical positions
+                }
+            }
+            idx       -= 2;
+            remaining -= 2;
+        }
+        false
+    }
+
+    pub fn half_move_over_ninety_nine(&self) -> bool {
+        self.half_move > 99
+    }
 
 
     pub fn compute_pins_checks(&self, us: Color) -> StateInfo {
@@ -720,13 +971,12 @@ impl Position {
     }
 
 
-    /// Returns `Some(result)` when the position is terminal,
-    /// otherwise `None` so the search can continue.
-    pub fn check_game_over(&self) -> Status {
+    pub fn game_status(&self) -> Status {
 
-        if self.half_move >= 100 {
-            return Status::Draw;
+        if self.half_move >= 100 || self.is_three_fold_repetition() {
+            return Draw;
         }
+
         // 1.  Generate every legal move for the side to move.
         if all_moves(self).is_empty() {
             // 2.  No moves → either mate or stalemate.
@@ -737,17 +987,17 @@ impl Position {
             self.get_game_result()
         } else {
             // Game still in progress
-            Status::Ongoing
+            Ongoing
         }
     }
 
     pub fn get_game_result(&self) -> Status {
         if self.in_check() {
             // Side to move is mated; the *opposite* color wins.
-            let winner = !self.turn();
-            Status::Checkmate(winner)
+            let winner = !self.side_to_move();
+            Checkmate(winner)
         } else {
-            Status::Draw
+            Draw
         }
     }
 
@@ -803,7 +1053,7 @@ impl Position {
     }
 
     #[inline(always)]
-    pub fn turn(&self) -> Color {
+    pub fn side_to_move(&self) -> Color {
         self.turn
     }
 
@@ -924,6 +1174,15 @@ impl Position {
         self.bitboards[color as usize][piece as usize]
     }
 
+
+    #[inline(always)]
+    pub fn last_move(&self) -> Option<Move> {
+        if self.undo_stack.len < 1 {
+            return None;
+        }
+        Some(self.undo_stack.peek_index((self.undo_stack.len - 1) as usize).mov)
+    }
+    
     #[inline(always)]
     pub fn third_last_move(&self) -> Option<Move> {
         if self.undo_stack.len < 4 {
@@ -1020,7 +1279,14 @@ fn update_bitboards_pieces(position: &mut Position, ch: char, square: u8) {
 
 
 
-
+#[inline(always)]
+fn doubled_pawns(bitboard: u64) -> i32 {
+    // Count excess pawns per file: 0 if ≤1 pawn, 1 for doubled, 2 for tripled, etc.
+    const FILES: [u64; 8] = [FILE_A, FILE_B, FILE_C, FILE_D, FILE_E, FILE_F, FILE_G, FILE_H];
+    FILES.iter()
+        .map(|f| ((bitboard & *f).count_ones() as i32 - 1).max(0))
+        .sum()
+}
 
 
 
@@ -1262,7 +1528,7 @@ mod tests {
         assert_eq!(pos.board[to], colored_piece);
         assert_eq!(pos.board[from], EMPTY_PIECE);
         assert_eq!(pos.en_passant(), 20); // square between d2 and d4
-        assert_eq!(pos.turn(), Color::Black);
+        assert_eq!(pos.side_to_move(), Color::Black);
     }
 
     #[test]
@@ -1280,7 +1546,7 @@ mod tests {
         assert_eq!(pos.board, original_pos.board);
         assert_eq!(pos.bitboards, original_pos.bitboards);
         assert_eq!(pos.occupancy, original_pos.occupancy);
-        assert_eq!(pos.turn(), original_pos.turn());
+        assert_eq!(pos.side_to_move(), original_pos.side_to_move());
         assert_consistent(&pos,"");
     }
 

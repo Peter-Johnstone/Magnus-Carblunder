@@ -193,8 +193,8 @@ pub(crate) fn negamax(
 
     if let Some(e) = ctx.tt.probe(pos.zobrist()) {
         hash_move = e.mv;
-        let entry_ok = e.depth >= depth;
-
+        // ── ignore “null-move” TT hits at the root ──
+        let entry_ok = e.depth >= depth && !(ctx.ply == 0 && e.mv.is_null());
         if entry_ok {
             ctx.pv_array[ctx.pv_index] = e.mv;
             match e.bound {

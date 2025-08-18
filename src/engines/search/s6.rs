@@ -29,7 +29,6 @@ pub(crate) fn negamax(
     }
 
     ctx.nodes += 1;
-    ctx.tt_probes += 1;
 
     let orig_alpha = alpha;
 
@@ -37,7 +36,6 @@ pub(crate) fn negamax(
     let mut hash_move = Move::null();
 
     if let Some(e) = ctx.tt.probe(pos.zobrist()) {
-        ctx.tt_hits += 1;
         hash_move = e.mv;
         let entry_ok = e.depth >= depth;
 
@@ -98,13 +96,6 @@ pub(crate) fn negamax(
         }
     }
 
-    /* stats: did hash move really lead? ---------------------------- */
-    if !hash_move.is_null()
-        && matches!(moves.get(0), mv if mv == hash_move)
-    {
-        ctx.hash_first += 1;
-    }
-
     /* ----- 4. prepare PV bookkeeping ----------------------------- */
     ctx.pv_array[ctx.pv_index] = Move::null();
     let pv_next_index = ctx.pv_index + (MAX_DEPTH - ctx.ply) as usize;
@@ -141,15 +132,6 @@ pub(crate) fn negamax(
         };
         let score = -child_score;
 
-        let was_beta_cut = score >= beta;
-
-        if m == hash_move {
-            ctx.tt_played += 1;
-            if was_beta_cut { ctx.tt_played_cut += 1; }
-        } else if m == pv_move {
-            ctx.pv_played += 1;
-            if was_beta_cut { ctx.pv_played_cut += 1; }
-        }
 
         if score > best_score {
             best_score = score;

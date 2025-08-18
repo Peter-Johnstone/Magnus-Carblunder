@@ -10,7 +10,7 @@ use crate::position::{StateInfo, Position};
 
 
 pub fn all_moves(position: &Position) -> MoveList {
-    let us: Color = position.turn();
+    let us: Color = position.side_to_move();
     let allies: u64 = position.occupancy(us);
     let enemies: u64 = position.occupancy(!us);
     let mut moves = MoveList::new();

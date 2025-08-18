@@ -2,7 +2,9 @@ use chess::engines::engine_manager::Engine;
 use chess::position::Position;
 use chess::simulator::engine_battle_simulator::{battle_against_other_eval_algos, battle_against_other_search_algos, print_bar_graph, simulate_many_battles};
 
-use funtime;           // re-exported proc-macro
+use funtime;
+use chess::engines::eval_weight::set_mobility_muls_centi;
+// re-exported proc-macro
 
 
 
@@ -13,12 +15,59 @@ fn eval_1() {
 
 #[test]
 fn eval_2() {
-    battle_against_other_eval_algos(5, 2, 20, 1000);
+    battle_against_other_eval_algos(13, 2, 10, 500);
 }
 
 #[test]
 fn eval_3() {
-    battle_against_other_search_algos(5, 3, 2, 1000);
+    battle_against_other_eval_algos(12, 3, 10, 500);
+}
+
+
+#[test]
+fn determine_best_mobility_multiplier() {
+    let search_algo = 12;
+    let time_ms = 10;
+    let batch_size = 1000;
+
+    // Engines exactly as you have them
+    let mut engine_no_mobility    = Engine::new(search_algo, 1, time_ms);
+    let mut engine_with_mobility  = Engine::new(search_algo, 2, time_ms);
+
+    // keep global centi storage as-is, but tune in real units
+    let mut theta: f64 = 9.0;   // real units, not centi
+    let lr: f64 = 0.01;         // your tiny LR now makes sense
+    let c0: f64 = 0.5;          // real-units perturbation ~ half a point
+    let iters = 1000;
+
+    for k in 1..=iters {
+        let ck = c0 / (k as f64).sqrt().max(1.0);
+
+        // map real -> centi only when setting globals
+        let t_plus_centi  = ((theta + ck) * 100.0).round() as i32;
+        set_mobility_muls_centi(0, t_plus_centi);
+        let (wa, la, da) = simulate_many_battles(&mut engine_no_mobility, &mut engine_with_mobility, batch_size);
+        set_mobility_muls_centi(t_plus_centi, 0);
+        let (wb, lb, db) = simulate_many_battles(&mut engine_with_mobility, &mut engine_no_mobility, batch_size);
+        let r_plus = (2*(la + wb) + (da + db)) as f64;
+
+        let t_minus_centi = ((theta - ck) * 100.0).round() as i32;
+        set_mobility_muls_centi(0, t_minus_centi);
+        let (wa2, la2, da2) = simulate_many_battles(&mut engine_no_mobility, &mut engine_with_mobility, batch_size);
+        set_mobility_muls_centi(t_minus_centi, 0);
+        let (wb2, lb2, db2) = simulate_many_battles(&mut engine_with_mobility, &mut engine_no_mobility, batch_size);
+        let r_minus = (2*(la2 + wb2) + (da2 + db2)) as f64;
+
+        let g = (r_plus - r_minus) / (2.0 * ck);  // derivative wrt real-units
+        theta = (theta + lr * g).clamp(0.0, 20.0);
+
+        eprintln!("iter {k:02}: theta={theta:.2}  r+={r_plus:.1} r-={r_minus:.1}  g={g:.3}");
+    }
+
+    // lock it in
+    let learned_centi = (theta * 100.0).round() as i32;
+    set_mobility_muls_centi(learned_centi, learned_centi);
+
 }
 
 
@@ -59,7 +108,39 @@ fn search_9() {
 
 #[test]
 fn search_10() {
-    battle_against_other_search_algos(10, 1, 7, 1000);
+    battle_against_other_search_algos(10, 1, 15, 1000);
+}
+
+#[test]
+fn search_11() {
+    battle_against_other_search_algos(11, 1, 40, 15);
+}
+
+#[test]
+fn search_12() {
+    battle_against_other_search_algos(12, 1, 10, 500);
+}
+
+
+#[test]
+fn search_13() {
+    battle_against_other_search_algos(13, 2, 10, 500);
+}
+
+#[test]
+fn search_14() {
+    battle_against_other_search_algos(14, 2, 10, 500);
+}
+
+
+#[test]
+fn simplified_2() {
+    let (challenger_s, challenger_e) = (19, 2);
+    let (champion_s, champion_e) = (20, 2);
+    let mut challenger = Engine::new(challenger_s, challenger_e, 5);
+    let mut champion = Engine::new(champion_s, champion_e, 5);
+    let (wins, losses, draws) = simulate_many_battles(&mut challenger, &mut champion, 2000);
+    print_bar_graph(wins, losses, draws, challenger_s, challenger_e);
 }
 
 
@@ -71,8 +152,6 @@ fn engine_2() {
     let mut challenger = Engine::new(challenger_s, challenger_e, 5);
     let mut champion = Engine::new(champion_s, champion_e, 5);
     let (wins, losses, draws) = simulate_many_battles(&mut challenger, &mut champion, 100);
-
-
     print_bar_graph(wins, losses, draws, challenger_s, challenger_s);
 }
 
@@ -93,11 +172,14 @@ fn test_transposition_table_node_decrease() {
     assert!(no_tt > with_tt);
 }
 
+
+
+
 #[test]
 fn test_pv_move_ordering_node_decrease() {
     let mut position = Position::load_position_from_fen("8/7p/6p1/5p2/8/2p3P1/8/2K1k3 b - - 1 43");
-    let no_pv = nodes_at_depth(&mut position, 4, 10);
-    let with_pv = nodes_at_depth(&mut position, 5, 10);
+    let no_pv = nodes_at_depth(&mut position, 4, 12);
+    let with_pv = nodes_at_depth(&mut position, 5, 12);
     println!("no pv:   {:?}", no_pv);
     println!("with pv: {:?}", with_pv);
     assert!(no_pv > with_pv);
@@ -111,6 +193,42 @@ fn test_hash_move_ordering_node_decrease() {
     println!("no hash move:   {:?}", no_hash_move);
     println!("with hash move: {:?}", with_hash_move);
     assert!(no_hash_move > with_hash_move);
+}
+
+
+
+#[test]
+fn test_null_moves_node_decrease() {
+    let mut position = Position::load_position_from_fen("8/7p/6p1/5p2/8/2p3P1/8/2K1k3 b - - 1 43");
+    let no_tt = nodes_at_depth(&mut position, 8, 12);
+    let with_tt = nodes_at_depth(&mut position, 9, 12);
+    println!("no null move:   {:?}", no_tt);
+    println!("with null move: {:?}", with_tt);
+    assert!(no_tt > with_tt);
+}
+#[test]
+fn test_killer_moves_node_decrease() {
+    let mut position = Position::load_position_from_fen("6k1/3q1pp1/pp5p/1r5n/8/1P3PP1/PQ4BP/2R3K1 w - - 0 1");
+    let no_tt = nodes_at_depth(&mut position, 11, 10);
+    let with_tt = nodes_at_depth(&mut position, 12, 10);
+    println!("no killers:   {:?}", no_tt);
+    println!("with killers: {:?}", with_tt);
+    assert!(no_tt > with_tt);
+}
+
+#[test]
+fn test_killer_moves_depth_increase() {
+    let mut challenger = Engine::new(11, 1, 10000);
+    let mut champion = Engine::new(12, 1, 10000);
+
+
+    //let mut position = Position::load_position_from_fen("8/7p/6p1/5p2/8/2p3P1/8/2K1k3 b - - 1 43");
+    let mut position = Position::load_position_from_fen("6k1/3q1pp1/pp5p/1r5n/8/1P3PP1/PQ4BP/2R3K1 w - - 0 1");
+    let (_, challenger_depth, _) = challenger.pick_and_stats(&mut position);
+    let (_, champion_depth, _) = champion.pick_and_stats(&mut position);
+    println!("Challenger depth: {}", challenger_depth);
+    println!("Champion depth: {}", champion_depth);
+    assert!(champion_depth > challenger_depth);
 }
 
 
@@ -171,3 +289,6 @@ fn test_MVVLVA_move_ordering_depth_increase() {
     println!("Champion depth: {}", champion_depth);
     assert!(champion_depth > challenger_depth);
 }
+
+
+

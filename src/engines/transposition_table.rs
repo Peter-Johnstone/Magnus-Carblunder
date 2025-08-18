@@ -3,7 +3,7 @@ use crate::mov::Move;
 const CLUSTER_SIZE: usize = 4;
 
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone, Default, PartialEq)]
 
 pub enum Bound {
     #[default]
