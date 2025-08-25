@@ -18,6 +18,7 @@ fn write_if_changed(path: &Path, new_content: &str) {
 }
 
 fn main() {
+    return
     println!("cargo:rerun-if-changed=build.rs");
     let dir = Path::new("table_gen");
     if let Ok(entries) = fs::read_dir(dir) {

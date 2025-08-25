@@ -283,6 +283,9 @@ pub(crate) fn negamax(
     if depth == 0 {
         return quiescence(pos, alpha, beta, color, deadline, ctx);
     }
+    // if depth == 0 {
+    //     return Some((color*pos.evaluate(), Move::null()));
+    // }
 
     /* ----- 3. generate moves & check terminal positions ----------- */
     let mut moves = all_moves(pos);

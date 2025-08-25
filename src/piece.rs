@@ -11,6 +11,9 @@ pub enum Piece {
     King   = 5,   // 0b0101
 }
 
+
+pub const PIECE_SCORES: [i32; 6] = [  100, 320, 330, 500, 900, 10000];
+pub const SEE_SCORES: [i32; 6] = [100, 325, 325, 500, 950, 30000];
 impl Piece {
     pub fn piece_initial(self) -> char {
         match  { self } {

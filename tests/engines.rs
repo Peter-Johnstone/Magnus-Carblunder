@@ -3,7 +3,6 @@ use chess::position::Position;
 use chess::simulator::engine_battle_simulator::{battle_against_other_eval_algos, battle_against_other_search_algos, print_bar_graph, simulate_many_battles};
 
 use funtime;
-use chess::engines::eval_weight::set_mobility_muls_centi;
 // re-exported proc-macro
 
 
@@ -21,53 +20,6 @@ fn eval_2() {
 #[test]
 fn eval_3() {
     battle_against_other_eval_algos(12, 3, 10, 500);
-}
-
-
-#[test]
-fn determine_best_mobility_multiplier() {
-    let search_algo = 12;
-    let time_ms = 10;
-    let batch_size = 1000;
-
-    // Engines exactly as you have them
-    let mut engine_no_mobility    = Engine::new(search_algo, 1, time_ms);
-    let mut engine_with_mobility  = Engine::new(search_algo, 2, time_ms);
-
-    // keep global centi storage as-is, but tune in real units
-    let mut theta: f64 = 9.0;   // real units, not centi
-    let lr: f64 = 0.01;         // your tiny LR now makes sense
-    let c0: f64 = 0.5;          // real-units perturbation ~ half a point
-    let iters = 1000;
-
-    for k in 1..=iters {
-        let ck = c0 / (k as f64).sqrt().max(1.0);
-
-        // map real -> centi only when setting globals
-        let t_plus_centi  = ((theta + ck) * 100.0).round() as i32;
-        set_mobility_muls_centi(0, t_plus_centi);
-        let (wa, la, da) = simulate_many_battles(&mut engine_no_mobility, &mut engine_with_mobility, batch_size);
-        set_mobility_muls_centi(t_plus_centi, 0);
-        let (wb, lb, db) = simulate_many_battles(&mut engine_with_mobility, &mut engine_no_mobility, batch_size);
-        let r_plus = (2*(la + wb) + (da + db)) as f64;
-
-        let t_minus_centi = ((theta - ck) * 100.0).round() as i32;
-        set_mobility_muls_centi(0, t_minus_centi);
-        let (wa2, la2, da2) = simulate_many_battles(&mut engine_no_mobility, &mut engine_with_mobility, batch_size);
-        set_mobility_muls_centi(t_minus_centi, 0);
-        let (wb2, lb2, db2) = simulate_many_battles(&mut engine_with_mobility, &mut engine_no_mobility, batch_size);
-        let r_minus = (2*(la2 + wb2) + (da2 + db2)) as f64;
-
-        let g = (r_plus - r_minus) / (2.0 * ck);  // derivative wrt real-units
-        theta = (theta + lr * g).clamp(0.0, 20.0);
-
-        eprintln!("iter {k:02}: theta={theta:.2}  r+={r_plus:.1} r-={r_minus:.1}  g={g:.3}");
-    }
-
-    // lock it in
-    let learned_centi = (theta * 100.0).round() as i32;
-    set_mobility_muls_centi(learned_centi, learned_centi);
-
 }
 
 
@@ -135,13 +87,21 @@ fn search_14() {
 
 #[test]
 fn simplified_2() {
-    let (challenger_s, challenger_e) = (19, 2);
-    let (champion_s, champion_e) = (20, 2);
-    let mut challenger = Engine::new(challenger_s, challenger_e, 5);
-    let mut champion = Engine::new(champion_s, champion_e, 5);
-    let (wins, losses, draws) = simulate_many_battles(&mut challenger, &mut champion, 2000);
+    let (challenger_s, challenger_e) = (30,2);
+    let (champion_s, champion_e) = (26, 2);
+    let time_ms = 6;
+    let num_battles = 500;
+    println!("\
+    \n\n\n\n                      SIMULATING ENGINE\
+    \n                     [search: {champion_s}, eval: {champion_e}]
+--------------------------------------------------------------");
+    let mut challenger = Engine::new(challenger_s, challenger_e, time_ms);
+    let mut champion = Engine::new(champion_s, champion_e, time_ms);
+    let (wins, losses, draws) = simulate_many_battles(&mut challenger, &mut champion, num_battles);
     print_bar_graph(wins, losses, draws, challenger_s, challenger_e);
 }
+
+
 
 
 
@@ -277,7 +237,7 @@ fn test_hash_move_ordering_depth_increase() {
 }
 
 #[test]
-fn test_MVVLVA_move_ordering_depth_increase() {
+fn test_mvvlva_move_ordering_depth_increase() {
     let mut challenger = Engine::new(6, 3, 10000);
     let mut champion = Engine::new(7, 3, 10000);
 

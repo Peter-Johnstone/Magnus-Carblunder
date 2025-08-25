@@ -367,6 +367,27 @@ impl MoveList {
     }
 
     #[inline(always)]
+    /// NOT CHECKED!!! Make sure mv.is_null() is false!
+    pub (crate) fn index_opt(&self, search_mv: Move) -> Option<usize> {
+        for (i, mv) in self.iter().enumerate() {
+            if mv == search_mv {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    #[inline(always)]
+    pub (crate) fn contains(&self, mv: Move) -> bool {
+        for m in self.iter() {
+            if m == mv {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[inline(always)]
     pub fn push(&mut self, m: Move) {
         self.moves[self.len] = m;
         self.len += 1;

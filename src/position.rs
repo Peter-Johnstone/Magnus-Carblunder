@@ -11,7 +11,7 @@ use crate::tables::{zobrist, KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS, RAYS};
 use crate::mov::{en_passant_capture_pawn, flag, index_to_algebraic, is_flag_capture_promo, is_flag_quiet_promo, new_en_passant_square, Move};
 use crate::direction::Dir;
 use crate::eval::{build_eval, mirror, EvalCache, EG_VALUE, MG_VALUE, PHASE_INC, PST_EG, PST_MG};
-use crate::piece::{is_empty, is_slider_val, piece_to_val, to_color, to_piece, to_str, ColoredPiece, Piece, EMPTY_PIECE};
+use crate::piece::{is_empty, is_slider_val, piece_to_val, to_color, to_piece, to_str, ColoredPiece, Piece, EMPTY_PIECE, SEE_SCORES};
 use crate::position::Status::{Checkmate, Draw, Ongoing};
 pub(crate) use crate::state_info::StateInfo;
 use crate::undo::{Undo, UndoStack};
@@ -814,6 +814,130 @@ impl Position {
         }
     }
 
+    #[inline(always)]
+    pub fn see(&self, mv: Move) -> bool {
+        if !mv.is_capture() { return false; }
+
+        let from = mv.from() as usize;
+        let to   = mv.to()   as usize;
+
+        let attacker = self.piece_at_sq(mv.from()) as usize;
+        let victim   = self.piece_at_sq(mv.to())   as usize;
+
+        // Cheap fast-path for threshold 0
+        if SEE_SCORES[attacker] <= SEE_SCORES[victim] {
+            return true;
+        }
+
+        // --- local copies (do NOT mutate self) ---
+        let mut bb  = self.bitboards;   // [[u64;6];2]
+        let mut occ = self.occupancy;   // [u64;2]
+
+        let us   = self.turn as usize;
+        let them = (!self.turn) as usize;
+
+        let from_bb = 1u64 << from;
+        let to_bb   = 1u64 << to;
+
+        // 1) remove mover from its origin square
+        bb[us][attacker] &= !from_bb;
+        occ[us]          &= !from_bb;
+
+        // 2) remove the captured piece from TO
+        bb[them][victim] &= !to_bb;
+        occ[them]        &= !to_bb;
+
+        // 3) keep TO considered occupied by the "last mover"
+        occ[us]          |= to_bb;
+
+        // initial gain = victim + (optional) promotion bonus
+        let mut gain  = [0i32; 32];
+        let mut depth = 0usize;
+
+        let promo_bonus = if is_flag_capture_promo(mv.flag()) {
+            let promo_idx = mv.promotion_piece() as usize;
+            SEE_SCORES[promo_idx] - SEE_SCORES[Piece::Pawn as usize]
+        } else { 0 };
+        gain[0] = SEE_SCORES[victim] + promo_bonus;
+
+        // the piece currently on TO (what the opponent would win by recapturing)
+        let mut last_moved_val = if is_flag_capture_promo(mv.flag()) {
+            SEE_SCORES[mv.promotion_piece() as usize]
+        } else {
+            SEE_SCORES[attacker]
+        };
+
+        #[inline(always)]
+        fn attackers_to(
+            sq: usize,
+            bb: &[[u64;6];2],
+            occ_w: u64,
+            occ_b: u64
+        ) -> (u64, u64) {
+            let occ_all = occ_w | occ_b;
+            let w = (PAWN_ATTACKS[Black as usize][sq] & bb[White as usize][Piece::Pawn  as usize]) |
+                (KNIGHT_MOVES[sq]                & bb[White as usize][Piece::Knight as usize]) |
+                (diagonal_attacks(sq, occ_all)   & (bb[White as usize][Piece::Bishop as usize] | bb[White as usize][Piece::Queen as usize])) |
+                (orthogonal_attacks(sq, occ_all) & (bb[White as usize][Piece::Rook   as usize] | bb[White as usize][Piece::Queen as usize])) |
+                (KING_MOVES[sq]                  & bb[White as usize][Piece::King   as usize]);
+
+            let b = (PAWN_ATTACKS[White as usize][sq] & bb[Black as usize][Piece::Pawn  as usize]) |
+                (KNIGHT_MOVES[sq]                 & bb[Black as usize][Piece::Knight as usize]) |
+                (diagonal_attacks(sq, occ_all)    & (bb[Black as usize][Piece::Bishop as usize] | bb[Black as usize][Piece::Queen as usize])) |
+                (orthogonal_attacks(sq, occ_all)  & (bb[Black as usize][Piece::Rook   as usize] | bb[Black as usize][Piece::Queen as usize])) |
+                (KING_MOVES[sq]                   & bb[Black as usize][Piece::King   as usize]);
+            (w, b)
+        }
+
+        // opponent to move first after our capture
+        let mut side = them;
+
+        loop {
+            let (w_atk, b_atk) = attackers_to(to, &bb, occ[White as usize], occ[Black as usize]);
+            let a = if side == White as usize { w_atk } else { b_atk };
+            if a == 0 { break; }
+
+            // LVA: Pawn..King
+            let mut picked_sq = None;
+            let mut picked_pt = 0usize;
+            for pt in 0..=5 {
+                let cand = bb[side][pt] & a;
+                if cand != 0 {
+                    let lsb = cand & cand.wrapping_neg();
+                    picked_sq = Some(lsb.trailing_zeros() as usize);
+                    picked_pt = pt;
+                    break;
+                }
+            }
+            let sq = match picked_sq { Some(s) => s, None => break };
+
+            // ---- FIX #1: store alternating net gains, not raw values ----
+            depth += 1;
+            gain[depth] = last_moved_val - gain[depth - 1];
+
+            // the recapturing piece becomes the last mover
+            last_moved_val = SEE_SCORES[picked_pt];
+
+            // remove that attacker from its origin (it "moves" onto TO)
+            let bit = 1u64 << sq;
+            bb[side][picked_pt] &= !bit;
+            occ[side]           &= !bit;
+
+            side ^= 1;
+        }
+
+        // ---- FIX #2: classic fold with -max(-a, b) ----
+        while depth > 0 {
+            let m = std::cmp::max(-gain[depth - 1], gain[depth]);
+            gain[depth - 1] = -m;
+            depth -= 1;
+        }
+
+        gain[0] >= 0
+    }
+
+
+
     fn raw_material_diff(&self) -> i32 {
         const VALUES: [i32; 6] = [  100, 320, 330, 500, 900,   0];
 
@@ -830,7 +954,8 @@ impl Position {
             - VALUES[4] * self.piece_count(Piece::Queen, Black)
     }
 
-    fn count_nonpawn_pieces_total(&self) -> i32 {
+    #[inline(always)]
+    pub fn count_nonpawn_pieces_total(&self) -> i32 {
         self.piece_count(Piece::Knight, Black) +
             self.piece_count(Piece::Bishop, Black) +
             self.piece_count(Piece::Rook, Black) +

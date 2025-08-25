@@ -4,9 +4,10 @@ use crate::engines::constants::MAX_DEPTH;
 use crate::engines::engine_manager::Ctx;
 use crate::engines::transposition_table::Bound;
 use crate::mov::{Move, MoveList, MAX_MOVES};
-use crate::piece::Piece::{Pawn, Queen};
-use crate::position::{Position, };
+use crate::piece::Piece::Queen;
+use crate::position::{Position, Status};
 
+// Includes Static Evaluation Exchange for move ordering
 pub const MVV_LVA: [[u16; 6]; 6] =
     [
         [10150,    14,    13,    12,    11, 15010], // victim = pawn
@@ -24,7 +25,6 @@ struct MovePicker {
     head: usize,
     prio_end: usize, // index where the priority moves end (pv and tt)
     scores: [u16; MAX_MOVES],
-    is_quiescence: bool,
 }
 
 impl MovePicker {
@@ -53,12 +53,11 @@ impl MovePicker {
             head: 0,
             prio_end: i,
             scores: [0; MAX_MOVES],
-            is_quiescence: false,
         }
     }
 
     fn is_quiescence_move(pos: &Position, mv: Move) -> bool {
-        (   (mv.is_capture() && pos.see(mv))||
+        (   mv.is_capture() ||
             mv.is_promotion() ||
             mv.is_en_passant())
 
@@ -78,10 +77,15 @@ impl MovePicker {
 
     #[inline]
     /// mvs must already be quiescence form
-    fn new_quiescence(pos: &Position, tt_mv: Move, mut mvs: MoveList) -> MovePicker {
+    fn new_quiescence(pos: &Position, pv_mv: Move, tt_mv: Move, mut mvs: MoveList) -> MovePicker {
         let mut i = 0;
-
-        if Self::is_quiescence_move(pos, tt_mv) {
+        if Self::is_quiescence_move(pos, pv_mv) {
+            // put pv move at the front of the list
+            let pv_mv_i = mvs.index(pv_mv);
+            mvs.swap(pv_mv_i, i);
+            i += 1;
+        }
+        if Self::is_quiescence_move(pos, tt_mv) && pv_mv != tt_mv {
             // put tt move at the front of the list behind pv move (if it exists)
             let tt_mv_i = mvs.index(tt_mv);
             mvs.swap(tt_mv_i, i);
@@ -94,7 +98,6 @@ impl MovePicker {
             head: 0,
             prio_end: i,
             scores: [0; MAX_MOVES],
-            is_quiescence: true,
         }
     }
 
@@ -107,7 +110,6 @@ impl MovePicker {
             let aggressor = pos.piece_at_sq(mv.from());
             score += MVV_LVA[victim as usize][aggressor as usize];
             if pos.see(mv) {score += 15_000};
-
         }
         if mv.is_promotion() {
             if mv.promotion_piece() == Queen {
@@ -117,14 +119,11 @@ impl MovePicker {
                 return 0;
             }
         }
-        if self.is_quiescence {
-            return score;
-        }
         let killers = ctx.killers[ctx.ply as usize];
         if mv == killers[0] {
-            score += 10002;
-        } else if mv == killers[1] {
             score += 10001;
+        } else if mv == killers[1] {
+            score += 10002;
         } else if mv.is_castling() {
             score += 1000;
         } else if mv.is_en_passant() {
@@ -194,91 +193,9 @@ impl MovePicker {
     }
 }
 
-pub(crate) fn quiescence(
-    pos: &mut Position,
-    mut alpha: i16,
-    beta: i16,
-    color: i16,
-    deadline: Instant,
-    ctx: &mut Ctx,
-) -> Option<(i16, Move)> {
-    if Instant::now() >= deadline { return None; }
 
-    let mut hash_mv = Move::null();
-    if let Some(e) = ctx.tt.probe(pos.zobrist()) {
-        hash_mv = e.mv;
-        match e.bound {
-            Bound::Exact => return Some((e.score, e.mv)),
-            Bound::Lower if e.score >= beta => return Some((e.score, e.mv)),
-            Bound::Upper if e.score <= alpha => return Some((e.score, e.mv)),
-            _ => {}
-        }
-    }
 
-    let in_check = pos.in_check();
-    let orig_alpha = alpha;
 
-    // Only use stand-pat when NOT in check
-    let mut stand_pat = i16::MIN;
-    if !in_check {
-        stand_pat = color * pos.evaluate_2();
-        if stand_pat >= beta {
-            // ctx.tt.store(pos.zobrist(), 0, Bound::Lower, stand_pat, Move::null(), ctx.generation);
-            return Some((stand_pat, Move::null()));
-        }
-        if stand_pat > alpha {
-            alpha = stand_pat;
-        }
-    }
-
-    let all_mvs = all_moves(pos);
-    if all_mvs.is_empty() {
-        // mate or stalemate
-        return Some((color * pos.game_result_eval((MAX_DEPTH - ctx.ply) as u8), Move::null()));
-    }
-
-    // If in check: search ALL evasions; else: only captures/promos/ep
-    let mvs = if in_check {
-        all_mvs
-    } else {
-        MovePicker::quiescence_mvs(pos, &all_mvs)
-    };
-
-    if !in_check && mvs.is_empty() {
-        ctx.tt.store(pos.zobrist(), 0, Bound::Exact, stand_pat, Move::null(), ctx.generation);
-        return Some((stand_pat, Move::null()));
-    }
-
-    let num_mvs = mvs.len;
-    let mut mv_picker = MovePicker::new_quiescence(pos, hash_mv, mvs);
-    let mut best_move = Move::null();
-
-    for _ in 0..num_mvs {
-        let mv = mv_picker.next(ctx, pos);
-        pos.do_move(mv);
-        ctx.ply += 1;
-        let child = quiescence(pos, -beta, -alpha, -color, deadline, ctx);
-        ctx.ply -= 1;
-        pos.undo_move();
-
-        let score = match child { Some((s,_)) => -s, None => return Some((alpha, best_move)) };
-        if score >= beta {
-            return Some((score, mv));
-        }
-        if score > alpha {
-            alpha = score;
-            best_move = mv;
-        }
-    }
-
-    let bound = if alpha <= orig_alpha { Bound::Upper } else { Bound::Exact };
-    ctx.tt.store(pos.zobrist(), 0, bound, alpha, best_move, ctx.generation);
-    Some((alpha, best_move))
-}
-
-fn do_null_move_pruning(depth: u8, pos: &mut Position) -> bool {
-    depth >= 3 && !pos.in_check() && (pos.count_nonpawn_pieces_total() > 1)
-}
 
 pub(crate) fn negamax(
     pos: &mut Position,
@@ -289,14 +206,15 @@ pub(crate) fn negamax(
     deadline: Instant,
     ctx: &mut Ctx,
 ) -> Option<(i16, Move)> {
+    
+
     if (ctx.ply) >= MAX_DEPTH {
-        return Some((color * pos.evaluate_2(), Move::null()));
+        return Some((color * pos.evaluate(), Move::null()));
     }
 
     if depth == 0 {
-        return quiescence(pos, alpha, beta, color, deadline, ctx);
+        return Some((color*pos.evaluate(), Move::null()));
     }
-
     if ctx.ply > 0 && (pos.half_move() >= 100 || pos.is_repeat_towards_three_fold_repetition()) {
         return Some((0, Move::null()));
     }
@@ -306,9 +224,7 @@ pub(crate) fn negamax(
             return Some((0, Move::null()));
         }
 
-        //if do_null_move_pruning(depth, pos) {
-        if do_null_move_pruning(depth, pos) {
-
+        if depth >= 3 && !pos.in_check() {
             pos.do_null_move();
             ctx.ply += 1;
             let child = negamax(
@@ -329,8 +245,7 @@ pub(crate) fn negamax(
             };
 
             if score >= beta {
-                // FAIL-SOFT here: return the true score, not β
-                return Some((score, Move::null()));
+                return Some((beta, Move::null()));
             }
         }
     }
@@ -356,7 +271,7 @@ pub(crate) fn negamax(
         }
     }
 
-    let mvs = all_moves(pos);
+    let mut mvs = all_moves(pos);
     if mvs.is_empty() {
         return Some((color * pos.game_result_eval(depth), Move::null()));
     }
@@ -368,73 +283,42 @@ pub(crate) fn negamax(
 
     let mut best_move = Move::null();
     let mut best_score = i16::MIN + 1;
-    let is_root = ctx.ply == 0;
 
-    for i in 0..num_mvs {
+    for _ in 0..num_mvs {
+
+
         let mv = mv_picker.next(&ctx, pos);
         pos.do_move(mv);
+
         ctx.ply += 1;
-
-        let new_depth = depth -1 + extension(pos, mv);
-        let child = if i == 0 {
-            negamax(pos, new_depth, -beta, -alpha, -color, deadline, ctx)
-        } else {
-            let do_pvs =
-                depth >= 3 &&
-                    alpha.saturating_add(1) < beta &&
-                    !(mv.is_capture() || mv.is_promotion());
-
-            if !do_pvs {
-                negamax(pos, new_depth, -beta, -alpha, -color, deadline, ctx)
-            } else {
-                let a1 = alpha.saturating_add(1);
-                let probe = negamax(pos, new_depth, -a1, -alpha, -color, deadline, ctx);
-
-                match probe {
-                    None => None,
-                    Some((s_child, _)) => {
-                        let probe_parent = -s_child;
-                        if probe_parent > alpha && probe_parent < beta {
-                            negamax(pos, new_depth, -beta, -alpha, -color, deadline, ctx)
-                        } else {
-                            probe
-                        }
-                    }
-                }
-            }
-        };
+        let child = negamax(pos, depth - 1, -beta, -alpha, -color, deadline, ctx);
         ctx.ply -= 1;
+
         pos.undo_move();
 
-        if child.is_none() {
-            return if !is_root || i == 0 {
-                None
-            } else {
-                Some((alpha, best_move))
-            }
-        }
 
-        let child_score = child.unwrap().0;
-        let score = -child_score;
+        let child_score = match child {
+            None => return None,
+            Some((sc, _)) => sc,
+        };
+        let score = - child_score;
 
         if score > best_score {
             best_score = score;
             best_move = mv;
         }
+
         if score > alpha {
             alpha = score;
             ctx.pv.adopt(ctx.ply, mv);
         }
+
         if alpha >= beta {
             if !mv.is_capture() && depth >= 2 {
                 ctx.history.update_non_captures(mv, pos.side_to_move(), depth);
-                let killers = &mut ctx.killers[ctx.ply as usize];
-                if mv != killers[0] {
-                    killers[1] = killers[0];
-                    killers[0] = mv;
-                }
+                let killers = &mut ctx.killers[ctx.ply as usize]; // parent ply (ctx.ply was decremented already)
+                if mv != killers[0] { killers[1] = killers[0]; killers[0] = mv; }
             }
-            ctx.tt.store(pos.zobrist(), depth, Bound::Lower, alpha, mv, ctx.generation);
             break;
         }
     }
@@ -448,27 +332,23 @@ pub(crate) fn negamax(
     } else {
         Bound::Exact
     };
-    ctx.tt.store(pos.zobrist(), depth, bound, returned, best_move, ctx.generation);
+
+    ctx.tt.store(
+        pos.zobrist(),
+        depth,
+        bound,
+        returned,
+        best_move,
+        ctx.generation,
+    );
+
+
+
     Some((returned, best_move))
 }
 
 fn reduction(depth: u8) -> u8 {
+    // keep your custom schedule
     let r_u8 = if depth <= 4 { 2 } else { (((depth as i16) - 4 + 2) / 3 + 2) as u8 };
     depth.saturating_sub(1 + r_u8)
-}
-
-#[inline]
-fn pawn_to_penultimate(pos: &Position, mv: Move) -> bool {
-    if pos.piece_at_sq(mv.to()) != Pawn { return false; }
-    let to_rank = (mv.to() / 8) as u8; // 0..7
-    // White penultimate: rank 6 (squares 48..55); Black penultimate: rank 1 (8..15)
-    (pos.side_to_move().is_white() && to_rank == 6) ||
-        (pos.side_to_move().is_black() && to_rank == 1)
-}
-
-fn extension(pos: &Position, mv: Move) -> u8 {
-    if pos.in_check() || pawn_to_penultimate(&pos, mv) {
-        return 1
-    }
-    0
 }

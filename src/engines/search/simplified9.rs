@@ -4,7 +4,7 @@ use crate::engines::constants::MAX_DEPTH;
 use crate::engines::engine_manager::Ctx;
 use crate::engines::transposition_table::Bound;
 use crate::mov::{Move, MoveList, MAX_MOVES};
-use crate::piece::Piece::{Pawn, Queen};
+use crate::piece::Piece::Queen;
 use crate::position::{Position, };
 
 pub const MVV_LVA: [[u16; 6]; 6] =
@@ -24,7 +24,6 @@ struct MovePicker {
     head: usize,
     prio_end: usize, // index where the priority moves end (pv and tt)
     scores: [u16; MAX_MOVES],
-    is_quiescence: bool,
 }
 
 impl MovePicker {
@@ -53,7 +52,6 @@ impl MovePicker {
             head: 0,
             prio_end: i,
             scores: [0; MAX_MOVES],
-            is_quiescence: false,
         }
     }
 
@@ -94,7 +92,6 @@ impl MovePicker {
             head: 0,
             prio_end: i,
             scores: [0; MAX_MOVES],
-            is_quiescence: true,
         }
     }
 
@@ -117,9 +114,6 @@ impl MovePicker {
                 return 0;
             }
         }
-        if self.is_quiescence {
-            return score;
-        }
         let killers = ctx.killers[ctx.ply as usize];
         if mv == killers[0] {
             score += 10002;
@@ -132,7 +126,7 @@ impl MovePicker {
         } else if mv.is_quiet() || mv.is_double_push() {
             let h = ctx.history.index(mv, pos.side_to_move());
             return h.min(10_000)
-        }
+        }   
         score
     }
 
@@ -194,6 +188,8 @@ impl MovePicker {
     }
 }
 
+
+
 pub(crate) fn quiescence(
     pos: &mut Position,
     mut alpha: i16,
@@ -202,9 +198,12 @@ pub(crate) fn quiescence(
     deadline: Instant,
     ctx: &mut Ctx,
 ) -> Option<(i16, Move)> {
-    if Instant::now() >= deadline { return None; }
+    if Instant::now() >= deadline {
+        return None;
+    }
 
     let mut hash_mv = Move::null();
+
     if let Some(e) = ctx.tt.probe(pos.zobrist()) {
         hash_mv = e.mv;
         match e.bound {
@@ -215,55 +214,64 @@ pub(crate) fn quiescence(
         }
     }
 
-    let in_check = pos.in_check();
-    let orig_alpha = alpha;
-
-    // Only use stand-pat when NOT in check
-    let mut stand_pat = i16::MIN;
-    if !in_check {
-        stand_pat = color * pos.evaluate_2();
-        if stand_pat >= beta {
-            // ctx.tt.store(pos.zobrist(), 0, Bound::Lower, stand_pat, Move::null(), ctx.generation);
-            return Some((stand_pat, Move::null()));
-        }
-        if stand_pat > alpha {
-            alpha = stand_pat;
-        }
+    let stand_pat = color * pos.evaluate_2();
+    if stand_pat >= beta {
+        ctx.tt.store(
+            pos.zobrist(),
+            0,
+            Bound::Lower,
+            stand_pat,
+            Move::null(),
+            ctx.generation,
+        );
+        return Some((beta, Move::null())); // fail-high
+    }
+    if stand_pat > alpha {
+        alpha = stand_pat;
     }
 
     let all_mvs = all_moves(pos);
     if all_mvs.is_empty() {
-        // mate or stalemate
         return Some((color * pos.game_result_eval((MAX_DEPTH - ctx.ply) as u8), Move::null()));
     }
 
-    // If in check: search ALL evasions; else: only captures/promos/ep
-    let mvs = if in_check {
-        all_mvs
-    } else {
-        MovePicker::quiescence_mvs(pos, &all_mvs)
-    };
-
-    if !in_check && mvs.is_empty() {
-        ctx.tt.store(pos.zobrist(), 0, Bound::Exact, stand_pat, Move::null(), ctx.generation);
+    let mvs = MovePicker::quiescence_mvs(pos, &all_mvs);
+    let num_mvs = mvs.len;
+    if mvs.is_empty() {
+        ctx.tt.store(
+            pos.zobrist(),
+            0,
+            Bound::Exact,
+            stand_pat,
+            Move::null(),
+            ctx.generation,
+        );
         return Some((stand_pat, Move::null()));
     }
-
-    let num_mvs = mvs.len;
     let mut mv_picker = MovePicker::new_quiescence(pos, hash_mv, mvs);
+
     let mut best_move = Move::null();
+
 
     for _ in 0..num_mvs {
         let mv = mv_picker.next(ctx, pos);
+
         pos.do_move(mv);
+
         ctx.ply += 1;
         let child = quiescence(pos, -beta, -alpha, -color, deadline, ctx);
         ctx.ply -= 1;
+
         pos.undo_move();
 
-        let score = match child { Some((s,_)) => -s, None => return Some((alpha, best_move)) };
+        let score = match child {
+            None => return Some((alpha, best_move)),
+            Some((sc, _)) => -sc,
+        };
+
         if score >= beta {
-            return Some((score, mv));
+            ctx.tt.store(pos.zobrist(), 0, Bound::Lower, score, mv, ctx.generation);
+            return Some((beta, mv));
         }
         if score > alpha {
             alpha = score;
@@ -271,13 +279,15 @@ pub(crate) fn quiescence(
         }
     }
 
-    let bound = if alpha <= orig_alpha { Bound::Upper } else { Bound::Exact };
-    ctx.tt.store(pos.zobrist(), 0, bound, alpha, best_move, ctx.generation);
-    Some((alpha, best_move))
-}
+    let bound = if best_move.is_null() {
+        Bound::Exact
+    } else {
+        Bound::Upper
+    };
+    ctx.tt
+        .store(pos.zobrist(), 0, bound, alpha, best_move, ctx.generation);
 
-fn do_null_move_pruning(depth: u8, pos: &mut Position) -> bool {
-    depth >= 3 && !pos.in_check() && (pos.count_nonpawn_pieces_total() > 1)
+    Some((alpha, best_move))
 }
 
 pub(crate) fn negamax(
@@ -290,7 +300,7 @@ pub(crate) fn negamax(
     ctx: &mut Ctx,
 ) -> Option<(i16, Move)> {
     if (ctx.ply) >= MAX_DEPTH {
-        return Some((color * pos.evaluate_2(), Move::null()));
+        return Some((color * pos.evaluate(), Move::null()));
     }
 
     if depth == 0 {
@@ -306,9 +316,7 @@ pub(crate) fn negamax(
             return Some((0, Move::null()));
         }
 
-        //if do_null_move_pruning(depth, pos) {
-        if do_null_move_pruning(depth, pos) {
-
+        if depth >= 3 && !pos.in_check() {
             pos.do_null_move();
             ctx.ply += 1;
             let child = negamax(
@@ -329,8 +337,7 @@ pub(crate) fn negamax(
             };
 
             if score >= beta {
-                // FAIL-SOFT here: return the true score, not β
-                return Some((score, Move::null()));
+                return Some((beta, Move::null()));
             }
         }
     }
@@ -375,34 +382,8 @@ pub(crate) fn negamax(
         pos.do_move(mv);
         ctx.ply += 1;
 
-        let new_depth = depth -1 + extension(pos, mv);
-        let child = if i == 0 {
-            negamax(pos, new_depth, -beta, -alpha, -color, deadline, ctx)
-        } else {
-            let do_pvs =
-                depth >= 3 &&
-                    alpha.saturating_add(1) < beta &&
-                    !(mv.is_capture() || mv.is_promotion());
+        let child = negamax(pos, depth - 1, -beta, -alpha, -color, deadline, ctx);
 
-            if !do_pvs {
-                negamax(pos, new_depth, -beta, -alpha, -color, deadline, ctx)
-            } else {
-                let a1 = alpha.saturating_add(1);
-                let probe = negamax(pos, new_depth, -a1, -alpha, -color, deadline, ctx);
-
-                match probe {
-                    None => None,
-                    Some((s_child, _)) => {
-                        let probe_parent = -s_child;
-                        if probe_parent > alpha && probe_parent < beta {
-                            negamax(pos, new_depth, -beta, -alpha, -color, deadline, ctx)
-                        } else {
-                            probe
-                        }
-                    }
-                }
-            }
-        };
         ctx.ply -= 1;
         pos.undo_move();
 
@@ -434,7 +415,8 @@ pub(crate) fn negamax(
                     killers[0] = mv;
                 }
             }
-            ctx.tt.store(pos.zobrist(), depth, Bound::Lower, alpha, mv, ctx.generation);
+            // (optional) TT store on cutoff:
+            // ctx.tt.store(pos.zobrist(), depth, Bound::Lower, alpha, mv, ctx.generation);
             break;
         }
     }
@@ -455,20 +437,4 @@ pub(crate) fn negamax(
 fn reduction(depth: u8) -> u8 {
     let r_u8 = if depth <= 4 { 2 } else { (((depth as i16) - 4 + 2) / 3 + 2) as u8 };
     depth.saturating_sub(1 + r_u8)
-}
-
-#[inline]
-fn pawn_to_penultimate(pos: &Position, mv: Move) -> bool {
-    if pos.piece_at_sq(mv.to()) != Pawn { return false; }
-    let to_rank = (mv.to() / 8) as u8; // 0..7
-    // White penultimate: rank 6 (squares 48..55); Black penultimate: rank 1 (8..15)
-    (pos.side_to_move().is_white() && to_rank == 6) ||
-        (pos.side_to_move().is_black() && to_rank == 1)
-}
-
-fn extension(pos: &Position, mv: Move) -> u8 {
-    if pos.in_check() || pawn_to_penultimate(&pos, mv) {
-        return 1
-    }
-    0
 }

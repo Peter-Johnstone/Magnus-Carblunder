@@ -5,9 +5,9 @@ use crate::attacks::movegen::all_moves;
 use crate::color::Color;
 use crate::engines::constants::MAX_DEPTH;
 use crate::engines::engine_manager::Eval::{Basic, WithTradingBonus};
-use crate::engines::engine_manager::Search::{AlphaBeta, Minimax, Random, CaptureLastPieceMO, WithHashMoveOrdering, WithMVVLVAMoveOrdering, WithNullMovePruning, WithQuiescenceSearch, WithRootPVOrdering, WithTranspositionTable, WithHistoryHeuristic, WithKillerMoves, WithLMR, WithInCheckQuiescence, Simplified1, Simplified2, Simplified3, Testing, Simplified4, Simplified5, Simplified6};
+use crate::engines::engine_manager::Search::{AlphaBeta, Minimax, Random, CaptureLastPieceMO, WithHashMoveOrdering, WithMVVLVAMoveOrdering, WithNullMovePruning, WithQuiescenceSearch, WithRootPVOrdering, WithTranspositionTable, WithHistoryHeuristic, WithKillerMoves, WithLMR, WithInCheckQuiescence, Simplified1, Simplified2, Simplified3, Testing, Simplified4, Simplified5, Simplified6, Simplified7, Simplified8, Simplified9, Simplified10, Simplified11, Simplified12};
 use crate::engines::evaluate::{e1, e2};
-use crate::engines::search::{s1, s10, s11, s12, s13, s14, s2, s3, s4, s5, s6, s7, s8, s9, simplified1, simplified2, simplified3, simplified4, simplified5, simplified6, testing_only};
+use crate::engines::search::{s1, s10, s11, s12, s13, s14, s2, s3, s4, s5, s6, s7, s8, s9, simplified1, simplified10, simplified11, simplified12, simplified2, simplified3, simplified4, simplified5, simplified6, simplified7, simplified8, simplified9, testing_only};
 use crate::engines::transposition_table::TransTable;
 use crate::mov::Move;
 use crate::position::Position;
@@ -38,13 +38,19 @@ pub enum Search {
     Simplified4,
     Simplified5,
     Simplified6,
+    Simplified7,
+    Simplified8,
+    Simplified9,  // with graceful exit
+    Simplified10, // with pvs
+    Simplified11, // with search extensions for check
+    Simplified12, // with lmr
 
 
     Testing,
 
 }
 
-pub const NUMBER_OF_SEARCH_ALGORITHMS: u8 = 20;
+pub const NUMBER_OF_SEARCH_ALGORITHMS: u8 = 23;
 #[derive(Copy, Clone)]
 #[derive(Debug)]
 pub enum Eval {
@@ -78,6 +84,12 @@ impl TryFrom<u8> for Search {
             18 => Ok(Simplified4),
             19 => Ok(Simplified5),
             20 => Ok(Simplified6),
+            21 => Ok(Simplified7),
+            22 => Ok(Simplified8),
+            23 => Ok(Simplified9),
+            24 => Ok(Simplified10),
+            25 => Ok(Simplified11),
+            26 => Ok(Simplified12),
 
             30 => Ok(Testing),
             _ => Err(()),
@@ -200,8 +212,14 @@ impl Engine {
             Simplified4 => simplified4::minimax,
             Simplified5 => simplified5::minimax,
             Simplified6 => simplified6::minimax,
+            Simplified7 => simplified7::negamax,
+            Simplified8 => simplified8::negamax,
+            Simplified9 => simplified9::negamax,
+            Simplified10 => simplified10::negamax,
+            Simplified11 => simplified11::negamax,
+            Simplified12 => simplified12::negamax,
 
-            Testing => testing_only::minimax,
+            Testing => testing_only::negamax,
 
         }
     }

@@ -194,6 +194,7 @@ impl MovePicker {
     }
 }
 
+
 pub(crate) fn quiescence(
     pos: &mut Position,
     mut alpha: i16,
@@ -202,9 +203,12 @@ pub(crate) fn quiescence(
     deadline: Instant,
     ctx: &mut Ctx,
 ) -> Option<(i16, Move)> {
-    if Instant::now() >= deadline { return None; }
+    if Instant::now() >= deadline {
+        return None;
+    }
 
     let mut hash_mv = Move::null();
+
     if let Some(e) = ctx.tt.probe(pos.zobrist()) {
         hash_mv = e.mv;
         match e.bound {
@@ -215,54 +219,64 @@ pub(crate) fn quiescence(
         }
     }
 
-    let in_check = pos.in_check();
     let orig_alpha = alpha;
 
-    // Only use stand-pat when NOT in check
-    let mut stand_pat = i16::MIN;
-    if !in_check {
-        stand_pat = color * pos.evaluate_2();
-        if stand_pat >= beta {
-            // ctx.tt.store(pos.zobrist(), 0, Bound::Lower, stand_pat, Move::null(), ctx.generation);
-            return Some((stand_pat, Move::null()));
-        }
-        if stand_pat > alpha {
-            alpha = stand_pat;
-        }
+    let stand_pat = color * pos.evaluate_2();
+    if stand_pat >= beta {
+        ctx.tt.store(
+            pos.zobrist(),
+            0,
+            Bound::Lower,
+            stand_pat,
+            Move::null(),
+            ctx.generation,
+        );
+        // FAIL-SOFT: return the true score (not β)
+        return Some((stand_pat, Move::null()));
+    }
+    if stand_pat > alpha {
+        alpha = stand_pat;
     }
 
     let all_mvs = all_moves(pos);
     if all_mvs.is_empty() {
-        // mate or stalemate
         return Some((color * pos.game_result_eval((MAX_DEPTH - ctx.ply) as u8), Move::null()));
     }
 
-    // If in check: search ALL evasions; else: only captures/promos/ep
-    let mvs = if in_check {
-        all_mvs
-    } else {
-        MovePicker::quiescence_mvs(pos, &all_mvs)
-    };
-
-    if !in_check && mvs.is_empty() {
-        ctx.tt.store(pos.zobrist(), 0, Bound::Exact, stand_pat, Move::null(), ctx.generation);
+    let mvs = MovePicker::quiescence_mvs(pos, &all_mvs);
+    let num_mvs = mvs.len;
+    if mvs.is_empty() {
+        ctx.tt.store(
+            pos.zobrist(),
+            0,
+            Bound::Exact,
+            stand_pat,
+            Move::null(),
+            ctx.generation,
+        );
         return Some((stand_pat, Move::null()));
     }
-
-    let num_mvs = mvs.len;
     let mut mv_picker = MovePicker::new_quiescence(pos, hash_mv, mvs);
+
     let mut best_move = Move::null();
 
     for _ in 0..num_mvs {
         let mv = mv_picker.next(ctx, pos);
+
         pos.do_move(mv);
         ctx.ply += 1;
         let child = quiescence(pos, -beta, -alpha, -color, deadline, ctx);
         ctx.ply -= 1;
         pos.undo_move();
 
-        let score = match child { Some((s,_)) => -s, None => return Some((alpha, best_move)) };
+        let score = match child {
+            None => return Some((alpha, best_move)),
+            Some((sc, _)) => -sc,
+        };
+
         if score >= beta {
+            ctx.tt.store(pos.zobrist(), 0, Bound::Lower, score, mv, ctx.generation);
+            // FAIL-SOFT: return the true score (not β)
             return Some((score, mv));
         }
         if score > alpha {
@@ -271,13 +285,15 @@ pub(crate) fn quiescence(
         }
     }
 
+    // With fail-soft, final bound depends on whether we improved over the original α
     let bound = if alpha <= orig_alpha { Bound::Upper } else { Bound::Exact };
     ctx.tt.store(pos.zobrist(), 0, bound, alpha, best_move, ctx.generation);
+
     Some((alpha, best_move))
 }
 
 fn do_null_move_pruning(depth: u8, pos: &mut Position) -> bool {
-    depth >= 3 && !pos.in_check() && (pos.count_nonpawn_pieces_total() > 1)
+    depth >= 3 && !pos.in_check() && (pos.count_nonpawn_pieces_total() > 12)
 }
 
 pub(crate) fn negamax(
@@ -307,7 +323,7 @@ pub(crate) fn negamax(
         }
 
         //if do_null_move_pruning(depth, pos) {
-        if do_null_move_pruning(depth, pos) {
+        if false {
 
             pos.do_null_move();
             ctx.ply += 1;

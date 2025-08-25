@@ -1,7 +1,7 @@
 use crate::attacks::movegen::all_moves;
 use crate::color::Color;
 use crate::color::Color::White;
-use crate::engines::engine_manager::{Engine, NUMBER_OF_EVAL_ALGORITHMS, NUMBER_OF_SEARCH_ALGORITHMS};
+use crate::engines::engine_manager::{Engine, NUMBER_OF_EVAL_ALGORITHMS};
 use crate::gui::{GuiState, UiEvent};
 use crate::mov::{Move, MoveList};
 use crate::position::{Position, Status, NO_SQ};
@@ -78,9 +78,10 @@ const PLAYERS_ONLY: bool = false;
 impl GameController {
 
     pub async fn new(game_mode: GameMode) -> Self {
-        let white_engine = Engine::new(13,  NUMBER_OF_EVAL_ALGORITHMS, 1000);
-        let black_engine = Engine::new(13, NUMBER_OF_EVAL_ALGORITHMS, 1000);
+        let white_engine = Engine::new(26,  NUMBER_OF_EVAL_ALGORITHMS, 1000);
+        let black_engine = Engine::new(26, NUMBER_OF_EVAL_ALGORITHMS, 1000);
         let position = Position::start();
+        //let position = Position::load_position_from_fen("1k6/8/8/8/8/2K5/5q3/8 b - - 0 0");
         let gui = GuiState::new(game_mode == GameMode::PlayerBlack, game_mode.clone(), white_engine.name(), black_engine.name()).await;
         let (eval_tx, eval_rx) = spawn_eval_worker();
 
@@ -358,7 +359,7 @@ fn spawn_eval_worker() -> (Sender<EvalRequest>, Receiver<EvalUpdate>) {
         let mut slice_ms = BASE_MS;
 
         // strongest search, best eval, initial slice
-        let mut engine = Engine::new(13, 2, slice_ms);
+        let mut engine = Engine::new(25, 2, slice_ms);
 
         let mut current: Option<Position> = None;
         let mut last_depth: u8 = 0;
