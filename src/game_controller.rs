@@ -9,7 +9,6 @@ use crate::undo::UndoStack;
 use macroquad::prelude::{get_time, is_key_pressed, is_mouse_button_pressed, mouse_position, next_frame, KeyCode, MouseButton};
 use std::cmp::PartialEq;
 use std::sync::mpsc::{Receiver, Sender};
-use crate::piece::{ColoredPiece};
 
 struct MoveAnimation {
     from: u8,
@@ -48,7 +47,7 @@ pub struct GameController {
     selected_moves: MoveList,
     selected_square: u8,
     game_mode: GameMode,
-    game_status: Status,    // pos doesn't keep track of game status because it would be too much work during search.
+    game_status: Status,
 
     last_depth: u8,
     last_eval: i16,
@@ -78,10 +77,10 @@ const PLAYERS_ONLY: bool = false;
 impl GameController {
 
     pub async fn new(game_mode: GameMode) -> Self {
-        let white_engine = Engine::new(26,  NUMBER_OF_EVAL_ALGORITHMS, 1000);
-        let black_engine = Engine::new(26, NUMBER_OF_EVAL_ALGORITHMS, 1000);
+        let white_engine = Engine::new(26,  NUMBER_OF_EVAL_ALGORITHMS, 2000);
+        let black_engine = Engine::new(26, NUMBER_OF_EVAL_ALGORITHMS, 2000);
         let position = Position::start();
-        //let position = Position::load_position_from_fen("1k6/8/8/8/8/2K5/5q3/8 b - - 0 0");
+        //let position = Position::load_position_from_fen("8/8/8/8/3k4/8/6q1/4K3 b - - 0 0");
         let gui = GuiState::new(game_mode == GameMode::PlayerBlack, game_mode.clone(), white_engine.name(), black_engine.name()).await;
         let (eval_tx, eval_rx) = spawn_eval_worker();
 

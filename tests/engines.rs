@@ -89,8 +89,8 @@ fn search_14() {
 fn simplified_2() {
     let (challenger_s, challenger_e) = (30,2);
     let (champion_s, champion_e) = (26, 2);
-    let time_ms = 6;
-    let num_battles = 500;
+    let time_ms = 10;
+    let num_battles = 1000;
     println!("\
     \n\n\n\n                      SIMULATING ENGINE\
     \n                     [search: {champion_s}, eval: {champion_e}]

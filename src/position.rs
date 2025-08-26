@@ -788,15 +788,17 @@ impl Position {
     pub fn captured_pieces(&self) -> [u8; 10] {
         [
             (8 - self.piece_count(Piece::Pawn, White)) as u8,
-            (2 - self.piece_count(Piece::Knight, White)) as u8,
-            (2 - self.piece_count(Piece::Bishop, White)) as u8,
-            (2 - self.piece_count(Piece::Rook, White)) as u8,
-            (1 - self.piece_count(Piece::Queen, White)) as u8,
+            // saturating sub in case of promotions
+            2u8.saturating_sub(self.piece_count(Piece::Knight, White) as u8),
+            2u8.saturating_sub(self.piece_count(Piece::Bishop, White) as u8),
+            2u8.saturating_sub(self.piece_count(Piece::Rook, White) as u8),
+            1u8.saturating_sub(self.piece_count(Piece::Queen, White) as u8),
+
             (8 - self.piece_count(Piece::Pawn, Black)) as u8,
-            (2 - self.piece_count(Piece::Knight, Black)) as u8,
-            (2 - self.piece_count(Piece::Bishop, Black)) as u8,
-            (2 - self.piece_count(Piece::Rook, Black)) as u8,
-            (1 - self.piece_count(Piece::Queen, Black)) as u8,
+            2u8.saturating_sub(self.piece_count(Piece::Knight, Black) as u8),
+            2u8.saturating_sub(self.piece_count(Piece::Bishop, Black) as u8),
+            2u8.saturating_sub(self.piece_count(Piece::Rook, Black) as u8),
+            1u8.saturating_sub(self.piece_count(Piece::Queen, Black) as u8),
         ]
     }
 

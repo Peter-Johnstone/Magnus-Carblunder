@@ -293,7 +293,7 @@ pub(crate) fn quiescence(
 }
 
 fn do_null_move_pruning(depth: u8, pos: &mut Position) -> bool {
-    depth >= 3 && !pos.in_check() && (pos.count_nonpawn_pieces_total() > 12)
+    depth >= 3 && !pos.in_check() && (pos.count_nonpawn_pieces_total() > 2)
 }
 
 pub(crate) fn negamax(
@@ -317,13 +317,16 @@ pub(crate) fn negamax(
         return Some((0, Move::null()));
     }
 
+    if Instant::now() >= deadline {
+        return None;
+    }
+
     if ctx.ply > 0 {
         if pos.half_move() >= 100 || pos.is_repeat_towards_three_fold_repetition() {
             return Some((0, Move::null()));
         }
 
-        //if do_null_move_pruning(depth, pos) {
-        if false {
+        if do_null_move_pruning(depth, pos) {
 
             pos.do_null_move();
             ctx.ply += 1;
@@ -339,19 +342,14 @@ pub(crate) fn negamax(
             ctx.ply -= 1;
             pos.undo_null_move();
 
-            let score = match child {
-                Some((s, _)) => -s,
-                None => return None,
-            };
-
-            if score >= beta {
-                // FAIL-SOFT here: return the true score, not β
-                return Some((score, Move::null()));
+            if let Some((sc, _)) = child {
+                let score = -sc;
+                if score >= beta {
+                    // FAIL-SOFT here: return the true score, not β
+                    return Some((score, Move::null()));
+                }
             }
         }
-    }
-    if Instant::now() >= deadline {
-        return None;
     }
 
     let orig_alpha = alpha;

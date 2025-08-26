@@ -241,17 +241,7 @@ impl Engine {
             pos.undo_stack.make_space();
         }
         let ctx = &mut self.search_ctx;
-        {
-            ctx.history.clear();   // reset history to 0s
-            ctx.generation = ctx.generation.wrapping_add(1);
-            ctx.total_nodes += ctx.nodes;
-            ctx.nodes     = 0;
-            ctx.pv_index  = 0;
-            ctx.ply       = 0;
-            ctx.stats     = Stats::default();
-            ctx.pv_array[0] = Move::null();
-            ctx.killers.iter_mut().for_each(|slot| *slot = [Move::null(); 2]);
-        }
+        Self::reset_ctx(ctx);
 
         let deadline = Instant::now() + Duration::from_millis(self.time_ms);
         let color    = if pos.side_to_move() == Color::White { 1 } else { -1 };
@@ -261,7 +251,6 @@ impl Engine {
         let mut depth     = 1u8;
 
         while Instant::now() < deadline {
-            // ----- 1a. run search (mutable borrow inside this block)
 
             ctx.stats     = Stats::default();
             ctx.pv_index  = 0;
@@ -304,11 +293,24 @@ impl Engine {
         }
 
         if best.is_null() {
+            println!("buggin");
             best = all_moves(pos).get(0);
         }
 
         // depth now points one past the last *completed* ply
         (best, depth.saturating_sub(1), best_eval)
+    }
+
+    fn reset_ctx(ctx: &mut Ctx) {
+        ctx.history.clear();   // reset history to 0s
+        ctx.generation = ctx.generation.wrapping_add(1);
+        ctx.total_nodes += ctx.nodes;
+        ctx.nodes = 0;
+        ctx.pv_index = 0;
+        ctx.ply = 0;
+        ctx.stats = Stats::default();
+        ctx.pv_array[0] = Move::null();
+        ctx.killers.iter_mut().for_each(|slot| *slot = [Move::null(); 2]);
     }
 
     pub fn clone(&self) -> Engine {
@@ -348,18 +350,7 @@ impl Engine {
         // (0) fresh bookkeeping for this whole search
         // ───────────────────────────────────────────────────────────────
         let ctx = &mut self.search_ctx;
-        {
-            ctx.history.clear(); // reset history to 0
-            ctx.generation = ctx.generation.wrapping_add(1);
-            ctx.total_nodes += ctx.nodes;
-            ctx.nodes     = 0;
-            ctx.pv_index  = 0;
-            ctx.ply       = 0;
-            ctx.pv_array[0] = Move::null();
-            ctx.pv.clear_node(ctx.ply);
-
-            ctx.killers.iter_mut().for_each(|slot| *slot = [Move::null(); 2]);
-        }
+        Self::reset_ctx(ctx);
 
         const FAR_FUTURE_SECS: u64 = 1000 * 365 * 24 * 60 * 60; // ~1000 years
         let deadline = Instant::now() + Duration::from_secs(FAR_FUTURE_SECS); //no deadline
@@ -389,18 +380,7 @@ impl Engine {
             pos.undo_stack.make_space();
         }
         let ctx = &mut self.search_ctx;
-        {
-            ctx.history.clear();   // reset history to 0s
-            ctx.generation = ctx.generation.wrapping_add(1);
-            ctx.total_nodes += ctx.nodes;
-            ctx.nodes     = 0;
-            ctx.pv_index  = 0;
-            ctx.ply       = 0;
-            ctx.pv_array[0] = Move::null();
-            ctx.pv.clear_node(ctx.ply);
-
-            ctx.killers.iter_mut().for_each(|slot| *slot = [Move::null(); 2]);
-        }
+        Self::reset_ctx(ctx);
 
         const FAR_FUTURE_SECS: u64 = 1000 * 365 * 24 * 60 * 60; // ~1000 years
         let deadline = Instant::now() + Duration::from_secs(FAR_FUTURE_SECS); //no deadline
