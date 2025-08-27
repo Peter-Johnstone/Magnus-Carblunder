@@ -5,9 +5,9 @@ use crate::attacks::movegen::all_moves;
 use crate::color::Color;
 use crate::engines::constants::MAX_DEPTH;
 use crate::engines::engine_manager::Eval::{Basic, WithTradingBonus};
-use crate::engines::engine_manager::Search::{AlphaBeta, Minimax, Random, CaptureLastPieceMO, WithHashMoveOrdering, WithMVVLVAMoveOrdering, WithNullMovePruning, WithQuiescenceSearch, WithRootPVOrdering, WithTranspositionTable, WithHistoryHeuristic, WithKillerMoves, WithLMR, WithInCheckQuiescence, Simplified1, Simplified2, Simplified3, Testing, Simplified4, Simplified5, Simplified6, Simplified7, Simplified8, Simplified9, Simplified10, Simplified11, Simplified12};
+use crate::engines::engine_manager::Search::{AlphaBeta, Minimax, Random, CaptureLastPieceMO, WithHashMoveOrdering, WithMVVLVAMoveOrdering, WithNullMovePruning, WithQuiescenceSearch, WithRootPVOrdering, WithTranspositionTable, WithHistoryHeuristic, WithKillerMoves, WithLMR, WithInCheckQuiescence, Simplified1, Simplified2, Simplified3, Testing, Simplified4, Simplified5, Simplified6, Simplified7, Simplified8, Simplified9, Simplified10, Simplified11, Simplified12, Simplified13};
 use crate::engines::evaluate::{e1, e2};
-use crate::engines::search::{s1, s10, s11, s12, s13, s14, s2, s3, s4, s5, s6, s7, s8, s9, simplified1, simplified10, simplified11, simplified12, simplified2, simplified3, simplified4, simplified5, simplified6, simplified7, simplified8, simplified9, testing_only};
+use crate::engines::search::{s1, s10, s11, s12, s13, s14, s2, s3, s4, s5, s6, s7, s8, s9, simplified1, simplified10, simplified11, simplified12, simplified13, simplified2, simplified3, simplified4, simplified5, simplified6, simplified7, simplified8, simplified9, testing_only};
 use crate::engines::transposition_table::TransTable;
 use crate::mov::Move;
 use crate::position::Position;
@@ -44,6 +44,7 @@ pub enum Search {
     Simplified10, // with pvs
     Simplified11, // with search extensions for check
     Simplified12, // with lmr
+    Simplified13,
 
 
     Testing,
@@ -218,6 +219,7 @@ impl Engine {
             Simplified10 => simplified10::negamax,
             Simplified11 => simplified11::negamax,
             Simplified12 => simplified12::negamax,
+            Simplified13 => simplified13::negamax,
 
             Testing => testing_only::negamax,
 

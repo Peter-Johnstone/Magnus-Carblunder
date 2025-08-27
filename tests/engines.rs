@@ -3,8 +3,6 @@ use chess::position::Position;
 use chess::simulator::engine_battle_simulator::{battle_against_other_eval_algos, battle_against_other_search_algos, print_bar_graph, simulate_many_battles};
 
 use funtime;
-// re-exported proc-macro
-
 
 
 #[test]
@@ -87,21 +85,19 @@ fn search_14() {
 
 #[test]
 fn simplified_2() {
-    let (challenger_s, challenger_e) = (30,2);
+    let (challenger_s, challenger_e) = (25,2);
     let (champion_s, champion_e) = (26, 2);
-    let time_ms = 10;
+    let time_ms = 6;
     let num_battles = 1000;
     println!("\
     \n\n\n\n                      SIMULATING ENGINE\
     \n                     [search: {champion_s}, eval: {champion_e}]
 --------------------------------------------------------------");
     let mut challenger = Engine::new(challenger_s, challenger_e, time_ms);
-    let mut champion = Engine::new(champion_s, champion_e, time_ms);
+    let mut champion   = Engine::new(champion_s, champion_e, time_ms);
     let (wins, losses, draws) = simulate_many_battles(&mut challenger, &mut champion, num_battles);
     print_bar_graph(wins, losses, draws, challenger_s, challenger_e);
 }
-
-
 
 
 

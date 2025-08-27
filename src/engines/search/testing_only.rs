@@ -332,7 +332,7 @@ pub(crate) fn negamax(
             ctx.ply += 1;
             let child = negamax(
                 pos,
-                reduction(depth),
+                nmp_reduction(depth),
                 -beta,
                 -beta + 1,
                 -color,
@@ -389,7 +389,12 @@ pub(crate) fn negamax(
         pos.do_move(mv);
         ctx.ply += 1;
 
-        let new_depth = depth -1 + extension(pos, mv);
+
+        let base = depth.saturating_sub(1);
+        let ext  = extension(pos, mv);
+        let r = late_move_reduction(i, depth, ext);
+        let new_depth = base.saturating_add(ext).saturating_sub(r);
+
         let child = if i == 0 {
             negamax(pos, new_depth, -beta, -alpha, -color, deadline, ctx)
         } else {
@@ -429,7 +434,23 @@ pub(crate) fn negamax(
         }
 
         let child_score = child.unwrap().0;
-        let score = -child_score;
+        let mut score = -child_score;
+
+        if r > 0 && score > alpha {
+            let full_depth = base.saturating_add(ext);
+
+            pos.do_move(mv);
+            ctx.ply += 1;
+            let child2 = negamax(pos, full_depth, -beta, -alpha, -color, deadline, ctx);
+            ctx.ply -= 1;
+            pos.undo_move();
+
+            if let Some((sc2, _)) = child2 {
+                score = -sc2;
+            } else {
+                return Some((alpha, best_move))
+            }
+        }
 
         if score > best_score {
             best_score = score;
@@ -466,10 +487,26 @@ pub(crate) fn negamax(
     Some((returned, best_move))
 }
 
-fn reduction(depth: u8) -> u8 {
+fn nmp_reduction(depth: u8) -> u8 {
     let r_u8 = if depth <= 4 { 2 } else { (((depth as i16) - 4 + 2) / 3 + 2) as u8 };
     depth.saturating_sub(1 + r_u8)
 }
+
+fn late_move_reduction(mv_num: usize, depth: u8, ext: u8) -> u8 {
+    let reduction = (0.36 + (depth as f32).ln() * (mv_num as f32).ln() / 3.0).floor() as u8;
+    if reduction > 1 && ext == 1 {
+        return reduction - 1
+    }
+    reduction
+}
+
+// fn late_move_reduction(mv_num: usize, depth: u8, ext: u8) -> u8 {
+//     let mut stop_reduce: f32 = 0.0;
+//     if ext == 1 {
+//         stop_reduce = 0.5;
+//     }
+//     (0.99 - stop_reduce + (depth as f32).ln() * (mv_num as f32).ln() / 3.14).floor() as u8
+// }
 
 #[inline]
 fn pawn_to_penultimate(pos: &Position, mv: Move) -> bool {

@@ -390,9 +390,9 @@ pub(crate) fn negamax(
         ctx.ply += 1;
 
 
+        let r = if depth >= 3 && i >= 3 { 1 } else { 0 };
         let base = depth.saturating_sub(1);
         let ext  = extension(pos, mv);
-        let r = late_move_reduction(i, depth, ext);
         let new_depth = base.saturating_add(ext).saturating_sub(r);
 
         let child = if i == 0 {
@@ -492,20 +492,20 @@ fn nmp_reduction(depth: u8) -> u8 {
     depth.saturating_sub(1 + r_u8)
 }
 
-
-#[inline]
-fn late_move_reduction(mv_num: usize, depth: u8, ext: u8) -> u8 {
-    let reduction = (0.50 + (depth as f32).ln() * (mv_num as f32).ln() / 3.0).floor() as u8;
-    if reduction > 1 && ext == 1 {
-        return reduction - 1
+fn late_move_reduction(mv_num: usize, depth: u8) -> u8 {
+    if mv_num >= 4 && depth >= 5 {
+        1
+        // (0.7844 + (depth as f32).ln() * (mv_num as f32) / 2.4696).floor() as u8
+    } else {
+        0
     }
-    reduction
 }
 
 #[inline]
 fn pawn_to_penultimate(pos: &Position, mv: Move) -> bool {
     if pos.piece_at_sq(mv.to()) != Pawn { return false; }
-    let to_rank = mv.to() / 8;
+    let to_rank = (mv.to() / 8) as u8; // 0..7
+    // White penultimate: rank 6 (squares 48..55); Black penultimate: rank 1 (8..15)
     (pos.side_to_move().is_white() && to_rank == 6) ||
         (pos.side_to_move().is_black() && to_rank == 1)
 }
