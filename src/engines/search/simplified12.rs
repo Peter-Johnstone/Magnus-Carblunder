@@ -345,7 +345,6 @@ pub(crate) fn negamax(
             if let Some((sc, _)) = child {
                 let score = -sc;
                 if score >= beta {
-                    // FAIL-SOFT here: return the true score, not β
                     return Some((score, Move::null()));
                 }
             }
@@ -495,7 +494,7 @@ fn nmp_reduction(depth: u8) -> u8 {
 
 #[inline]
 fn late_move_reduction(mv_num: usize, depth: u8, ext: u8) -> u8 {
-    let reduction = (0.50 + (depth as f32).ln() * (mv_num as f32).ln() / 3.0).floor() as u8;
+    let reduction = (0.99 + (depth as f32).ln() * (mv_num as f32).ln() / 3.14).floor() as u8;
     if reduction > 1 && ext == 1 {
         return reduction - 1
     }

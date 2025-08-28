@@ -11,7 +11,7 @@ use crate::tables::{zobrist, KING_MOVES, KNIGHT_MOVES, PAWN_ATTACKS, RAYS};
 use crate::mov::{en_passant_capture_pawn, flag, index_to_algebraic, is_flag_capture_promo, is_flag_quiet_promo, new_en_passant_square, Move};
 use crate::direction::Dir;
 use crate::eval::{build_eval, mirror, EvalCache, EG_VALUE, MG_VALUE, PHASE_INC, PST_EG, PST_MG};
-use crate::piece::{is_empty, is_slider_val, piece_to_val, to_color, to_piece, to_str, ColoredPiece, Piece, EMPTY_PIECE, SEE_SCORES};
+use crate::piece::{is_empty, is_slider_val, piece_to_val, to_color, to_piece, to_str, ColoredPiece, Piece, EMPTY_PIECE, PIECE_SCORES, SEE_SCORES};
 use crate::position::Status::{Checkmate, Draw, Ongoing};
 pub(crate) use crate::state_info::StateInfo;
 use crate::undo::{Undo, UndoStack};
@@ -212,7 +212,7 @@ impl Position {
         let color   = to_color(colored);
         let flag    = mov.flag();
 
-        /* ─── NEW: incremental-eval deltas initialisation ─────────── */
+        let mut d_raw_mat_diff = 0i32;
         let mut d_mg    = 0i32;
         let mut d_eg    = 0i32;
         let mut d_phase = 0i32;
@@ -221,13 +221,10 @@ impl Position {
         let to_i   = if color.is_white() { mirror(to)   } else { to   };
         let p_idx  = piece as usize;
 
-        // Moving piece leaves its square: remove its contribution from eval & phase
         d_mg    -= sgn * (PST_MG[p_idx][from_i] + MG_VALUE[p_idx]) as i32;
         d_eg    -= sgn * (PST_EG[p_idx][from_i] + EG_VALUE[p_idx]) as i32;
         d_phase -= PHASE_INC[p_idx];
-        /* ─────────────────────────────────────────────────────────── */
 
-        /* 2. capture info before mutating board --------------------- */
         let mut captured_piece  = EMPTY_PIECE;
         let mut captured_square = NO_SQ;
 
@@ -246,14 +243,13 @@ impl Position {
                 let cap_sq          = captured_square as usize;
                 let cap_i           = if captured_color.is_white() { mirror(cap_sq) } else { cap_sq };
 
-                // Removing a piece means subtracting its contribution from the eval & phase
+                d_raw_mat_diff -= csgn * PIECE_SCORES[cp];
                 d_mg    -= csgn * (PST_MG[cp][cap_i] + MG_VALUE[cp]) as i32;
                 d_eg    -= csgn * (PST_EG[cp][cap_i] + EG_VALUE[cp]) as i32;
                 d_phase -= PHASE_INC[cp];
             }
         }
 
-        /* 3. push undo **before** making changes -------------------- */
         self.undo_stack.push(Undo {
             captured_piece,
             captured_square,
@@ -261,7 +257,8 @@ impl Position {
             en_passant:  self.en_passant,
             half_move:   self.half_move,
             zobrist:     self.zobrist,
-            delta_mg:    0,           // filled later
+            delta_raw_piece_diff: 0,
+            delta_mg:    0,
             delta_eg:    0,
             delta_phase: 0,
             state_info: self.state_info,
@@ -327,7 +324,9 @@ impl Position {
 
         /* 6. add piece on TO (final piece after promotions) ---------- */
         let to_piece_idx = if is_flag_quiet_promo(flag) || is_flag_capture_promo(flag) {
-            mov.promotion_piece() as usize
+            let promo_piece = mov.promotion_piece() as usize;
+            d_raw_mat_diff += sgn * (PIECE_SCORES[promo_piece] - PIECE_SCORES[Piece::Pawn as usize]);
+            promo_piece
         } else {
             p_idx
         };
@@ -336,14 +335,14 @@ impl Position {
         d_eg += sgn * (PST_EG[to_piece_idx][to_i] + EG_VALUE[to_piece_idx]) as i32;
         d_phase += PHASE_INC[to_piece_idx];
 
-        /* 7. update eval cache -------------------------------------- */
+        self.eval.raw_mat_diff += d_raw_mat_diff;
         self.eval.mg    += d_mg;
         self.eval.eg    += d_eg;
         self.eval.phase += d_phase;
 
-        /* 8. update last pushed Undo with the deltas ---------------- */
         {
             let u = self.undo_stack.last_mut();
+            u.delta_raw_piece_diff = d_raw_mat_diff;
             u.delta_mg    = d_mg;
             u.delta_eg    = d_eg;
             u.delta_phase = d_phase;
@@ -422,6 +421,7 @@ impl Position {
 
 
         /* 4. restore incremental evaluation --------------------------- */
+        self.eval.raw_mat_diff -= undo.delta_raw_piece_diff;
         self.eval.mg    -= undo.delta_mg;
         self.eval.eg    -= undo.delta_eg;
         self.eval.phase -= undo.delta_phase;
@@ -696,8 +696,8 @@ impl Position {
 
         // 4) Tunable coefficients (in CP per piece of simplification).
         //    Stronger in endgame, milder in middlegame.
-        const SIMPLIFY_MG: i32 = 0;  // cp per piece of simplification when ahead
-        const SIMPLIFY_EG: i32 = 28;  // cp per piece of simplification when ahead
+        const SIMPLIFY_MG: i32 = 2;  // cp per piece of simplification when ahead
+        const SIMPLIFY_EG: i32 = 6;  // cp per piece of simplification when ahead
 
         // Bias sign follows the material lead:
         //  - If material_lead_cp > 0 => bonus for simplification (trading).
@@ -708,22 +708,10 @@ impl Position {
         let simplify_mg: i32 = lead_sign * SIMPLIFY_MG * simplified;
         let simplify_eg: i32 = lead_sign * SIMPLIFY_EG * simplified;
 
-        let wp = self.pawns(White);
-        let bp = self.pawns(Black);
-        let dp_white = doubled_pawns(wp);
-        let dp_black = doubled_pawns(bp);
-
-        const DP_MG: i32 = 30; // cp per extra pawn in a file (middlegame)
-        const DP_EG: i32 = 15;  // cp (endgame)
-
-        // Positive if Black has more doubles → increases White’s eval; negative if White has more → lowers eval.
-        let dp_mg: i32 = (dp_black - dp_white) * DP_MG;
-        let dp_eg: i32 = (dp_black - dp_white) * DP_EG;
-
-        // Blend
+        // Blend your base eval and the simplification term with the usual tapered scheme
         let blended_eval: i32 =
-            (self.eval.mg + simplify_mg + dp_mg) * mg_phase +
-                (self.eval.eg + simplify_eg + dp_eg) * eg_phase;
+            (self.eval.mg + simplify_mg) * mg_phase +
+                (self.eval.eg + simplify_eg) * eg_phase;
 
         (blended_eval / 24) as i16
     }
@@ -826,14 +814,12 @@ impl Position {
         let attacker = self.piece_at_sq(mv.from()) as usize;
         let victim   = self.piece_at_sq(mv.to())   as usize;
 
-        // Cheap fast-path for threshold 0
         if SEE_SCORES[attacker] <= SEE_SCORES[victim] {
             return true;
         }
 
-        // --- local copies (do NOT mutate self) ---
-        let mut bb  = self.bitboards;   // [[u64;6];2]
-        let mut occ = self.occupancy;   // [u64;2]
+        let mut bb  = self.bitboards;
+        let mut occ = self.occupancy;
 
         let us   = self.turn as usize;
         let them = (!self.turn) as usize;
@@ -891,7 +877,6 @@ impl Position {
             (w, b)
         }
 
-        // opponent to move first after our capture
         let mut side = them;
 
         loop {
@@ -913,14 +898,11 @@ impl Position {
             }
             let sq = match picked_sq { Some(s) => s, None => break };
 
-            // ---- FIX #1: store alternating net gains, not raw values ----
             depth += 1;
             gain[depth] = last_moved_val - gain[depth - 1];
 
-            // the recapturing piece becomes the last mover
             last_moved_val = SEE_SCORES[picked_pt];
 
-            // remove that attacker from its origin (it "moves" onto TO)
             let bit = 1u64 << sq;
             bb[side][picked_pt] &= !bit;
             occ[side]           &= !bit;
@@ -928,7 +910,6 @@ impl Position {
             side ^= 1;
         }
 
-        // ---- FIX #2: classic fold with -max(-a, b) ----
         while depth > 0 {
             let m = std::cmp::max(-gain[depth - 1], gain[depth]);
             gain[depth - 1] = -m;
@@ -939,8 +920,7 @@ impl Position {
     }
 
 
-
-    fn raw_material_diff(&self) -> i32 {
+    fn raw_material_diff_old(&self) -> i32 {
         const VALUES: [i32; 6] = [  100, 320, 330, 500, 900,   0];
 
         VALUES[0] * self.piece_count(Piece::Pawn, White)
@@ -954,6 +934,24 @@ impl Position {
             - VALUES[2] * self.piece_count(Piece::Bishop, Black)
             - VALUES[3] * self.piece_count(Piece::Rook, Black)
             - VALUES[4] * self.piece_count(Piece::Queen, Black)
+    }
+
+
+    fn raw_material_diff(&self) -> i32 {
+        self.eval.raw_mat_diff
+        // const VALUES: [i32; 6] = [  100, 320, 330, 500, 900,   0];
+        //
+        // VALUES[0] * self.piece_count(Piece::Pawn, White)
+        //     + VALUES[1] * self.piece_count(Piece::Knight, White)
+        //     + VALUES[2] * self.piece_count(Piece::Bishop, White)
+        //     + VALUES[3] * self.piece_count(Piece::Rook, White)
+        //     + VALUES[4] * self.piece_count(Piece::Queen, White)
+        //
+        //     - VALUES[0] * self.piece_count(Piece::Pawn, Black)
+        //     - VALUES[1] * self.piece_count(Piece::Knight, Black)
+        //     - VALUES[2] * self.piece_count(Piece::Bishop, Black)
+        //     - VALUES[3] * self.piece_count(Piece::Rook, Black)
+        //     - VALUES[4] * self.piece_count(Piece::Queen, Black)
     }
 
     #[inline(always)]

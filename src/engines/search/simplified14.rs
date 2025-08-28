@@ -286,12 +286,15 @@ pub(crate) fn quiescence(
     for _ in 0..num_mvs {
         let mv = mv_picker.next(ctx, pos);
 
+
+
         if !pos.in_check() {
             let delta = optimistic_delta(pos, mv);
             if stand_pat.saturating_add(delta).saturating_add(DELTA_MARGIN) <= alpha {
                 continue;
             }
         }
+
 
         pos.do_move(mv);
         ctx.ply += 1;
@@ -326,6 +329,17 @@ fn do_null_move_pruning(depth: u8, pos: &mut Position) -> bool {
     depth >= 3 && !pos.in_check() && (pos.count_nonpawn_pieces_total() > 2)
 }
 
+
+const FUT_MARGIN_1: i16 = 70; // for depth == 1
+const FUT_MARGIN_2: i16 = 70; // for depth == 2 (a bit larger)
+#[inline]
+fn fut_margin_for(depth: u8) -> i16 {
+    match depth {
+        0 | 1 => FUT_MARGIN_1,
+        2     => FUT_MARGIN_2,
+        _     => 0,
+    }
+}
 pub(crate) fn negamax(
     pos: &mut Position,
     depth: u8,
@@ -411,10 +425,33 @@ pub(crate) fn negamax(
 
     let mut best_move = Move::null();
     let mut best_score = i16::MIN + 1;
+    let is_pv_node = beta - alpha > 1;
     let is_root = ctx.ply == 0;
 
     for i in 0..num_mvs {
         let mv = mv_picker.next(&ctx, pos);
+
+        let static_eval = if !pos.in_check() {
+            color * pos.evaluate_2()
+        } else {
+            0 // unused if in_check; we won’t apply futility when in check
+        };
+
+        if depth <= 2
+            && !pos.in_check()
+            && !is_pv_node
+            && !mv.is_capture()
+            && !mv.is_promotion()
+            && !mv.is_en_passant()
+            && !mv.is_castling()
+        {
+            // Optional: very light optimism (e.g., king-safety/SEE) — but keep it minimal:
+            let margin = fut_margin_for(depth);
+            if static_eval.saturating_add(margin) <= alpha {
+                continue; // prune this quiet move
+            }
+        }
+
         pos.do_move(mv);
         ctx.ply += 1;
 
@@ -524,7 +561,7 @@ fn nmp_reduction(depth: u8) -> u8 {
 
 #[inline]
 fn late_move_reduction(mv_num: usize, depth: u8, ext: u8) -> u8 {
-    let reduction = (0.99 + (depth as f32).ln() * (mv_num as f32).ln() / 3.14).floor() as u8;
+    let reduction = (0.7 + (depth as f32).ln() * (mv_num as f32).ln() / 3.14).floor() as u8;
     if reduction > 1 && ext == 1 {
         return reduction - 1
     }

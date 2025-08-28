@@ -77,8 +77,8 @@ const PLAYERS_ONLY: bool = false;
 impl GameController {
 
     pub async fn new(game_mode: GameMode) -> Self {
-        let white_engine = Engine::new(26,  NUMBER_OF_EVAL_ALGORITHMS, 2000);
-        let black_engine = Engine::new(26, NUMBER_OF_EVAL_ALGORITHMS, 2000);
+        let white_engine = Engine::new(29,  NUMBER_OF_EVAL_ALGORITHMS, 2000);
+        let black_engine = Engine::new(29, NUMBER_OF_EVAL_ALGORITHMS, 2000);
         let position = Position::start();
         //let position = Position::load_position_from_fen("8/8/8/8/3k4/8/6q1/4K3 b - - 0 0");
         let gui = GuiState::new(game_mode == GameMode::PlayerBlack, game_mode.clone(), white_engine.name(), black_engine.name()).await;
@@ -358,7 +358,7 @@ fn spawn_eval_worker() -> (Sender<EvalRequest>, Receiver<EvalUpdate>) {
         let mut slice_ms = BASE_MS;
 
         // strongest search, best eval, initial slice
-        let mut engine = Engine::new(25, 2, slice_ms);
+        let mut engine = Engine::new(29, 2, slice_ms);
 
         let mut current: Option<Position> = None;
         let mut last_depth: u8 = 0;

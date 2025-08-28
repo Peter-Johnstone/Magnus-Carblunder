@@ -1,13 +1,14 @@
 use crate::color::Color;
-use crate::piece::Piece;
+use crate::piece::{Piece, PIECE_SCORES};
 use crate::position::Position;
 
 /// Mid-game / end-game scores kept incrementally.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct EvalCache {
-    pub(crate) mg: i32,        // White – Black, mid-game units
-    pub(crate) eg: i32,        // same for end-game
-    pub(crate) phase: i32,     // 24 → opening, … 0 → pure endings
+    pub(crate) raw_mat_diff: i32, // raw material difference
+    pub(crate) mg: i32,           // White – Black, mid-game units
+    pub(crate) eg: i32,           // same for end-game
+    pub(crate) phase: i32,        // 24 → opening, … 0 → pure endings
 }
 
 // Pawn, Knight, …, King PSTs (white’s view)
@@ -155,6 +156,7 @@ pub fn build_eval(pos: &Position) -> EvalCache {
                 let idx = if c.is_white() { mirror(sq) } else { sq };
                 let sgn = if c.is_white() { 1 } else { -1 };
 
+                cache.raw_mat_diff += sgn * (PIECE_SCORES[p]);
                 cache.mg += sgn * (PST_MG[p][idx] + MG_VALUE[p]) as i32;
                 cache.eg += sgn * (PST_EG[p][idx] + EG_VALUE[p]) as i32;
                 cache.phase += PHASE_INC[p];

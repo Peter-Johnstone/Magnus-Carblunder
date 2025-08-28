@@ -16,10 +16,11 @@ pub struct Undo {
     pub(crate) half_move:           u8,
     pub(crate) zobrist:             u64,
     pub(crate) state_info:          StateInfo,
-    pub(crate) mov:                 Move,      // 16‑bit
-    pub delta_mg: i32,
-    pub delta_eg: i32,
-    pub delta_phase: i32,
+    pub(crate) mov:                 Move,
+    pub(crate) delta_raw_piece_diff:i32,
+    pub(crate) delta_mg:            i32,
+    pub(crate) delta_eg:            i32,
+    pub(crate) delta_phase:         i32,
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +42,7 @@ impl UndoStack {
             zobrist: 0,
             state_info: StateInfo::default(),
             mov: Move::null(),
+            delta_raw_piece_diff: 0,
             delta_mg: 0,
             delta_eg: 0,
             delta_phase: 0,

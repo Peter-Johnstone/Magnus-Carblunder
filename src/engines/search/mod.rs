@@ -26,3 +26,5 @@ pub(crate) mod simplified10;
 pub(crate) mod simplified11;
 pub(crate) mod simplified12;
 pub(crate) mod simplified13;
+pub(crate) mod simplified14;
+pub(crate) mod simplified15;

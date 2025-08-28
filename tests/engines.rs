@@ -71,7 +71,6 @@ fn search_12() {
     battle_against_other_search_algos(12, 1, 10, 500);
 }
 
-
 #[test]
 fn search_13() {
     battle_against_other_search_algos(13, 2, 10, 500);
@@ -85,9 +84,9 @@ fn search_14() {
 
 #[test]
 fn simplified_2() {
-    let (challenger_s, challenger_e) = (25,2);
-    let (champion_s, champion_e) = (26, 2);
-    let time_ms = 6;
+    let (challenger_s, challenger_e) = (28,2);
+    let (champion_s, champion_e) = (29, 2);
+    let time_ms = 50;
     let num_battles = 1000;
     println!("\
     \n\n\n\n                      SIMULATING ENGINE\
