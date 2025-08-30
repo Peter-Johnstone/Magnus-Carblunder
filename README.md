@@ -1,6 +1,6 @@
 # Magnus Carlblunder ♟️
 
-A Rust-powered chess engine with a built-in GUI, a move generator, and **30 experimental search versions** you can pit against each other. The strongest version plays at super-grandmaster strength. All handcrafted by me.
+A Rust-powered chess engine with a built-in GUI, a move generator, and **30 experimental search versions** you can pit against each other. The strongest version plays at super-grandmaster (2800) strength. All handcrafted by me.
 
 
 
